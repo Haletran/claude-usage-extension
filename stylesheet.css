@@ -107,3 +107,11 @@
     font-style: italic;
     color: #808080;
 }
+
+/* Account header label (multi-account mode) */
+.claude-account-header-label {
+    font-size: 13px;
+    font-weight: bold;
+    color: #cc9544;
+    margin-top: 2px;
+}

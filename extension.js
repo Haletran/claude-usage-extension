@@ -13,6 +13,38 @@ import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/ex
 
 const API_URL = 'https://api.anthropic.com/api/oauth/usage';
 
+class AccountState {
+    constructor(id, label, configDir) {
+        this.id = id;
+        this.label = label;
+        this.configDir = configDir;
+        this.credentialsPath = GLib.build_filenamev([configDir, '.credentials.json']);
+        this.cachedData = null;
+        this.isTokenExpired = false;
+        this.fileMonitor = null;
+        this.fileMonitorSignalId = null;
+        this.debounceTimerId = null;
+        this.menuWidgets = null;
+    }
+
+    destroy() {
+        if (this.debounceTimerId) {
+            GLib.source_remove(this.debounceTimerId);
+            this.debounceTimerId = null;
+        }
+        if (this.fileMonitorSignalId && this.fileMonitor) {
+            this.fileMonitor.disconnect(this.fileMonitorSignalId);
+            this.fileMonitorSignalId = null;
+        }
+        if (this.fileMonitor) {
+            this.fileMonitor.cancel();
+            this.fileMonitor = null;
+        }
+        this.cachedData = null;
+        this.menuWidgets = null;
+    }
+}
+
 const ClaudeUsageIndicator = GObject.registerClass(
 class ClaudeUsageIndicator extends PanelMenu.Button {
     _init(extensionPath, settings, openPreferences) {
@@ -22,11 +54,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._settings = settings;
         this._openPreferences = openPreferences;
         this._session = this._createSession();
-        this._isTokenExpired = false;
-        this._cachedData = null;
-        this._credentialsMonitor = null;
-        this._credentialsMonitorId = null;
-        this._debounceTimerId = null;
+        this._accounts = [];
+        this._allTokensExpired = false;
 
         this._box = new St.BoxLayout({
             style_class: 'panel-status-menu-box',
@@ -60,8 +89,6 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
         this.add_child(this._box);
 
-        this._createMenu();
-
         this._updateDisplayMode();
         this._updateIconVisibility();
         this._updateIconStyle();
@@ -79,12 +106,13 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 this._updateIconStyle();
             } else if (key === 'hide-on-expired') {
                 this._updateExpiredVisibility();
+            } else if (key === 'extra-accounts' || key === 'account-labels') {
+                this._rebuildAccounts();
             }
         });
 
-        this._refreshUsage();
+        this._rebuildAccounts();
         this._startTimer();
-        this._startCredentialsMonitor();
     }
 
     _updateDisplayMode() {
@@ -130,8 +158,9 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             this._session.abort();
         }
         this._session = this._createSession();
-        this._refreshUsage();
-	}
+        this._refreshAllAccounts();
+    }
+
     _updateIconStyle() {
         const style = this._settings.get_string('icon-style');
         const desatName = 'monochrome-desaturate';
@@ -149,99 +178,151 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         }
     }
 
-    _createMenu() {
-        const fiveHourBox = new St.BoxLayout({
-            style_class: 'claude-usage-section',
-            vertical: true,
-        });
-        const fiveHourHeader = new St.BoxLayout({ vertical: false });
-        const fiveHourLabel = new St.Label({
-            text: '5-Hour Usage',
-            style_class: 'claude-section-title',
-        });
-        fiveHourHeader.add_child(fiveHourLabel);
-        this._fiveHourPercent = new St.Label({
-            text: '...',
-            style_class: 'claude-percent-label',
-            x_expand: true,
-            x_align: Clutter.ActorAlign.END,
-        });
-        fiveHourHeader.add_child(this._fiveHourPercent);
-        fiveHourBox.add_child(fiveHourHeader);
+    // --- Account discovery ---
 
-        const fiveHourProgressBg = new St.Widget({
-            style_class: 'claude-progress-bg',
-        });
-        this._fiveHourProgressBar = new St.Widget({
-            style_class: 'claude-progress-bar usage-low',
-        });
-        fiveHourProgressBg.add_child(this._fiveHourProgressBar);
-        fiveHourBox.add_child(fiveHourProgressBg);
+    _discoverAccounts() {
+        const seen = new Set();
+        const results = [];
 
-        this._fiveHourResetLabel = new St.Label({
-            text: 'Resets: ...',
-            style_class: 'claude-reset-label',
-        });
-        fiveHourBox.add_child(this._fiveHourResetLabel);
+        // Default account
+        const defaultDir = GLib.getenv('CLAUDE_CONFIG_DIR') ??
+            GLib.build_filenamev([GLib.get_home_dir(), '.claude']);
+        const defaultResolved = Gio.File.new_for_path(defaultDir).get_path();
+        seen.add(defaultResolved);
+        results.push({id: 'default', label: 'default', configDir: defaultResolved});
 
-        const fiveHourItem = new PopupMenu.PopupBaseMenuItem({
-            reactive: false,
-            can_focus: false,
-        });
-        fiveHourItem.add_child(fiveHourBox);
-        this.menu.addMenuItem(fiveHourItem);
+        // Auto-scan: ~/.claude-*/ directories with .credentials.json
+        try {
+            const homeDir = Gio.File.new_for_path(GLib.get_home_dir());
+            const enumerator = homeDir.enumerate_children(
+                'standard::name,standard::type',
+                Gio.FileQueryInfoFlags.NONE,
+                null
+            );
 
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+            let info;
+            while ((info = enumerator.next_file(null)) !== null) {
+                const name = info.get_name();
+                if (info.get_file_type() !== Gio.FileType.DIRECTORY)
+                    continue;
+                if (!name.match(/^\.claude-.+$/))
+                    continue;
 
-        const sevenDayBox = new St.BoxLayout({
-            style_class: 'claude-usage-section',
-            vertical: true,
-        });
-        const sevenDayHeader = new St.BoxLayout({ vertical: false });
-        const sevenDayLabel = new St.Label({
-            text: '7-Day Usage',
-            style_class: 'claude-section-title',
-        });
-        sevenDayHeader.add_child(sevenDayLabel);
-        this._sevenDayPercent = new St.Label({
-            text: '...',
-            style_class: 'claude-percent-label',
-            x_expand: true,
-            x_align: Clutter.ActorAlign.END,
-        });
-        sevenDayHeader.add_child(this._sevenDayPercent);
-        sevenDayBox.add_child(sevenDayHeader);
+                const dirPath = GLib.build_filenamev([GLib.get_home_dir(), name]);
+                const resolved = Gio.File.new_for_path(dirPath).get_path();
+                if (seen.has(resolved))
+                    continue;
 
-        const sevenDayProgressBg = new St.Widget({
-            style_class: 'claude-progress-bg',
-        });
-        this._sevenDayProgressBar = new St.Widget({
-            style_class: 'claude-progress-bar usage-low',
-        });
-        sevenDayProgressBg.add_child(this._sevenDayProgressBar);
-        sevenDayBox.add_child(sevenDayProgressBg);
+                const credFile = Gio.File.new_for_path(
+                    GLib.build_filenamev([dirPath, '.credentials.json'])
+                );
+                if (!credFile.query_exists(null))
+                    continue;
 
-        this._sevenDayResetLabel = new St.Label({
-            text: 'Resets: ...',
-            style_class: 'claude-reset-label',
-        });
-        sevenDayBox.add_child(this._sevenDayResetLabel);
+                seen.add(resolved);
+                const label = name.replace(/^\./, '');
+                results.push({id: label, label, configDir: resolved});
+            }
+            enumerator.close(null);
+        } catch (e) {
+            console.error('Claude Usage: Failed to scan home directory:', e.message);
+        }
 
-        const sevenDayItem = new PopupMenu.PopupBaseMenuItem({
-            reactive: false,
-            can_focus: false,
-        });
-        sevenDayItem.add_child(sevenDayBox);
-        this.menu.addMenuItem(sevenDayItem);
+        // Manual extra accounts from settings
+        const extraAccounts = this._settings.get_strv('extra-accounts');
+        for (const dirPath of extraAccounts) {
+            const resolved = Gio.File.new_for_path(dirPath).get_path();
+            if (seen.has(resolved))
+                continue;
 
-        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+            const credFile = Gio.File.new_for_path(
+                GLib.build_filenamev([resolved, '.credentials.json'])
+            );
+            if (!credFile.query_exists(null))
+                continue;
 
-        const settingsItem = new PopupMenu.PopupMenuItem('Settings');
-        settingsItem.connect('activate', () => {
-            this._openPreferences();
+            seen.add(resolved);
+            const baseName = GLib.path_get_basename(resolved).replace(/^\./, '');
+            results.push({id: baseName, label: baseName, configDir: resolved});
+        }
+
+        // Apply custom labels
+        const accountLabels = this._settings.get_strv('account-labels');
+        for (const entry of accountLabels) {
+            const sepIdx = entry.indexOf('|');
+            if (sepIdx === -1)
+                continue;
+            const path = entry.substring(0, sepIdx);
+            const customLabel = entry.substring(sepIdx + 1);
+            const resolvedPath = Gio.File.new_for_path(path).get_path();
+            const account = results.find(a => a.configDir === resolvedPath);
+            if (account)
+                account.label = customLabel;
+        }
+
+        // Sort: default first, then alphabetical by label
+        results.sort((a, b) => {
+            if (a.id === 'default') return -1;
+            if (b.id === 'default') return 1;
+            return a.label.localeCompare(b.label);
         });
-        this.menu.addMenuItem(settingsItem);
+
+        return results;
     }
+
+    // --- Account lifecycle ---
+
+    _rebuildAccounts() {
+        for (const account of this._accounts) {
+            account.destroy();
+        }
+        this._accounts = [];
+
+        const discovered = this._discoverAccounts();
+        for (const info of discovered) {
+            const account = new AccountState(info.id, info.label, info.configDir);
+            this._startAccountMonitor(account);
+            this._accounts.push(account);
+        }
+
+        this._rebuildMenu();
+        this._refreshAllAccounts();
+    }
+
+    // --- File monitoring per account ---
+
+    _startAccountMonitor(account) {
+        try {
+            const file = Gio.File.new_for_path(account.credentialsPath);
+            account.fileMonitor = file.monitor_file(Gio.FileMonitorFlags.NONE, null);
+            account.fileMonitorSignalId = account.fileMonitor.connect(
+                'changed',
+                (monitor, changedFile, otherFile, eventType) => {
+                    if (eventType === Gio.FileMonitorEvent.CHANGED ||
+                        eventType === Gio.FileMonitorEvent.CHANGES_DONE_HINT) {
+                        this._debouncedRefreshAccount(account);
+                    }
+                }
+            );
+        } catch (e) {
+            console.error(`Claude Usage: Failed to monitor ${account.credentialsPath}:`, e.message);
+        }
+    }
+
+    _debouncedRefreshAccount(account) {
+        if (account.debounceTimerId) {
+            GLib.source_remove(account.debounceTimerId);
+            account.debounceTimerId = null;
+        }
+        account.debounceTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+            account.debounceTimerId = null;
+            if (this._accounts.includes(account))
+                this._refreshAccount(account);
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    // --- Polling ---
 
     _startTimer() {
         const interval = this._settings.get_int('refresh-interval');
@@ -249,7 +330,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             GLib.PRIORITY_DEFAULT,
             interval,
             () => {
-                this._refreshUsage();
+                this._refreshAllAccounts();
                 return GLib.SOURCE_CONTINUE;
             }
         );
@@ -267,123 +348,58 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._startTimer();
     }
 
-    _startCredentialsMonitor() {
-        try {
-            const configDir = GLib.getenv('CLAUDE_CONFIG_DIR') ??
-                GLib.build_filenamev([GLib.get_home_dir(), '.claude']);
-            const credentialsPath = GLib.build_filenamev([
-                configDir,
-                '.credentials.json',
-            ]);
-            const file = Gio.File.new_for_path(credentialsPath);
-            this._credentialsMonitor = file.monitor_file(Gio.FileMonitorFlags.NONE, null);
-            this._credentialsMonitorId = this._credentialsMonitor.connect('changed', (monitor, changedFile, otherFile, eventType) => {
-                if (eventType === Gio.FileMonitorEvent.CHANGED ||
-                    eventType === Gio.FileMonitorEvent.CHANGES_DONE_HINT) {
-                    this._debouncedRefresh();
-                }
-            });
-        } catch (e) {
-            console.error('Claude Usage: Failed to start credentials monitor:', e.message);
-        }
-    }
-
-    _debouncedRefresh() {
-        if (this._debounceTimerId) {
-            GLib.source_remove(this._debounceTimerId);
-            this._debounceTimerId = null;
-        }
-        this._debounceTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
-            this._debounceTimerId = null;
-            this._refreshUsage();
-            return GLib.SOURCE_REMOVE;
+    _refreshAllAccounts() {
+        this._accounts.forEach((account, index) => {
+            if (index === 0) {
+                this._refreshAccount(account);
+            } else {
+                GLib.timeout_add(GLib.PRIORITY_DEFAULT, index * 200, () => {
+                    if (this._accounts.includes(account))
+                        this._refreshAccount(account);
+                    return GLib.SOURCE_REMOVE;
+                });
+            }
         });
     }
 
-    _stopCredentialsMonitor() {
-        if (this._debounceTimerId) {
-            GLib.source_remove(this._debounceTimerId);
-            this._debounceTimerId = null;
-        }
-        if (this._credentialsMonitorId && this._credentialsMonitor) {
-            this._credentialsMonitor.disconnect(this._credentialsMonitorId);
-            this._credentialsMonitorId = null;
-        }
-        if (this._credentialsMonitor) {
-            this._credentialsMonitor.cancel();
-            this._credentialsMonitor = null;
-        }
-    }
+    _refreshAccount(account) {
+        if (!this._accounts.includes(account))
+            return;
 
-    _setExpiredState(expired) {
-        this._isTokenExpired = expired;
-        const effectName = 'expired-desaturate';
+        const file = Gio.File.new_for_path(account.credentialsPath);
+        file.load_contents_async(null, (f, result) => {
+            if (!this._accounts.includes(account))
+                return;
 
-        if (expired) {
-            if (!this._icon.get_effect(effectName)) {
-                this._icon.add_effect(new Clutter.DesaturateEffect({factor: 1.0, name: effectName}));
-            }
-            this._icon.set_opacity(128);
-
-            if (this._cachedData) {
-                const fiveHour = this._cachedData.five_hour?.utilization ?? 0;
-                this._label.set_text(`${Math.round(fiveHour)}% (cached)`);
-                this._fiveHourPercent.set_text(`${fiveHour.toFixed(1)}% (cached)`);
-            } else {
-                this._label.set_text('Expired');
-                this._fiveHourPercent.set_text('Token expired');
-            }
-
-            this._updateExpiredVisibility();
-        } else {
-            this._icon.remove_effect_by_name(effectName);
-            this._icon.set_opacity(255);
-            this.show();
-        }
-    }
-
-    _updateExpiredVisibility() {
-        if (this._isTokenExpired && this._settings.get_boolean('hide-on-expired')) {
-            this.hide();
-        } else {
-            this.show();
-        }
-    }
-
-    _refreshUsage() {
-        const configDir = GLib.getenv('CLAUDE_CONFIG_DIR') ??
-            GLib.build_filenamev([GLib.get_home_dir(), '.claude']);
-        const credentialsPath = GLib.build_filenamev([
-            configDir,
-            '.credentials.json',
-        ]);
-
-        const file = Gio.File.new_for_path(credentialsPath);
-        file.load_contents_async(null, (file, result) => {
             try {
-                const [, contents] = file.load_contents_finish(result);
+                const [, contents] = f.load_contents_finish(result);
                 const decoder = new TextDecoder('utf-8');
                 const json = JSON.parse(decoder.decode(contents));
                 const token = json.claudeAiOauth?.accessToken;
 
                 if (!token) {
-                    this._label.set_text('No token');
-                    this._fiveHourPercent.set_text('No credentials');
-                    this._sevenDayPercent.set_text('—');
+                    this._setAccountNoToken(account);
+                    this._updatePanelFromAccounts();
                     return;
                 }
 
-                this._fetchUsage(token);
+                this._fetchAccountUsage(account, token);
             } catch (e) {
-                console.error('Claude Usage: Failed to read credentials:', e.message);
-                this._label.set_text('No token');
-                this._fiveHourPercent.set_text('No credentials');
-                this._sevenDayPercent.set_text('—');
+                console.error(`Claude Usage: Failed to read credentials for ${account.id}:`, e.message);
+                this._setAccountNoToken(account);
+                this._updatePanelFromAccounts();
             }
         });
     }
 
-    _fetchUsage(token) {
+    _setAccountNoToken(account) {
+        if (!account.menuWidgets)
+            return;
+        account.menuWidgets.fiveHourPercent.set_text('No credentials');
+        account.menuWidgets.sevenDayPercent.set_text('—');
+    }
+
+    _fetchAccountUsage(account, token) {
         const message = Soup.Message.new('GET', API_URL);
         message.request_headers.append('Authorization', `Bearer ${token}`);
         message.request_headers.append('anthropic-beta', 'oauth-2025-04-20');
@@ -393,60 +409,296 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             GLib.PRIORITY_DEFAULT,
             null,
             (session, result) => {
+                if (!this._accounts.includes(account))
+                    return;
+
                 try {
                     const bytes = session.send_and_read_finish(result);
 
                     if (message.status_code === 401) {
-                        this._setExpiredState(true);
+                        this._setAccountExpired(account, true);
+                        this._updatePanelFromAccounts();
                         return;
                     }
 
                     if (message.status_code !== 200) {
-                        this._label.set_text('Error');
-                        this._fiveHourPercent.set_text(`HTTP ${message.status_code}`);
+                        if (account.menuWidgets)
+                            account.menuWidgets.fiveHourPercent.set_text(`HTTP ${message.status_code}`);
                         return;
                     }
 
                     const decoder = new TextDecoder('utf-8');
                     const data = JSON.parse(decoder.decode(bytes.get_data()));
 
-                    this._cachedData = data;
-                    this._setExpiredState(false);
-                    this._updateDisplay(data);
+                    account.cachedData = data;
+                    this._setAccountExpired(account, false);
+                    this._updateAccountMenu(account, data);
+                    this._updatePanelFromAccounts();
                 } catch (e) {
-                    console.error('Claude Usage: Failed to fetch usage:', e.message);
-                    this._label.set_text('Error');
+                    console.error(`Claude Usage: Failed to fetch usage for ${account.id}:`, e.message);
                 }
             }
         );
     }
 
-    _updateDisplay(data) {
+    // --- Menu UI ---
+
+    _rebuildMenu() {
+        this.menu.removeAll();
+
+        if (this._accounts.length === 1) {
+            // Single account: identical layout to original
+            const account = this._accounts[0];
+            account.menuWidgets = this._createUsageSectionWidgets(account);
+        } else {
+            // Multi-account: header per account
+            this._accounts.forEach((account, index) => {
+                // Account header
+                const headerItem = new PopupMenu.PopupBaseMenuItem({
+                    reactive: false,
+                    can_focus: false,
+                });
+                const headerLabel = new St.Label({
+                    text: account.label,
+                    style_class: 'claude-account-header-label',
+                });
+                headerItem.add_child(headerLabel);
+                this.menu.addMenuItem(headerItem);
+
+                account.menuWidgets = this._createUsageSectionWidgets(account);
+
+                if (index < this._accounts.length - 1)
+                    this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+            });
+        }
+
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        const settingsItem = new PopupMenu.PopupMenuItem('Settings');
+        settingsItem.connect('activate', () => {
+            this._openPreferences();
+        });
+        this.menu.addMenuItem(settingsItem);
+    }
+
+    _createUsageSectionWidgets(account) {
+        // 5-Hour section
+        const fiveHourBox = new St.BoxLayout({
+            style_class: 'claude-usage-section',
+            vertical: true,
+        });
+        const fiveHourHeader = new St.BoxLayout({vertical: false});
+        const fiveHourLabel = new St.Label({
+            text: '5-Hour Usage',
+            style_class: 'claude-section-title',
+        });
+        fiveHourHeader.add_child(fiveHourLabel);
+        const fiveHourPercent = new St.Label({
+            text: '...',
+            style_class: 'claude-percent-label',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.END,
+        });
+        fiveHourHeader.add_child(fiveHourPercent);
+        fiveHourBox.add_child(fiveHourHeader);
+
+        const fiveHourProgressBg = new St.Widget({
+            style_class: 'claude-progress-bg',
+        });
+        const fiveHourProgressBar = new St.Widget({
+            style_class: 'claude-progress-bar usage-low',
+        });
+        fiveHourProgressBg.add_child(fiveHourProgressBar);
+        fiveHourBox.add_child(fiveHourProgressBg);
+
+        const fiveHourResetLabel = new St.Label({
+            text: 'Resets: ...',
+            style_class: 'claude-reset-label',
+        });
+        fiveHourBox.add_child(fiveHourResetLabel);
+
+        const fiveHourItem = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+        });
+        fiveHourItem.add_child(fiveHourBox);
+        this.menu.addMenuItem(fiveHourItem);
+
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+        // 7-Day section
+        const sevenDayBox = new St.BoxLayout({
+            style_class: 'claude-usage-section',
+            vertical: true,
+        });
+        const sevenDayHeader = new St.BoxLayout({vertical: false});
+        const sevenDayLabel = new St.Label({
+            text: '7-Day Usage',
+            style_class: 'claude-section-title',
+        });
+        sevenDayHeader.add_child(sevenDayLabel);
+        const sevenDayPercent = new St.Label({
+            text: '...',
+            style_class: 'claude-percent-label',
+            x_expand: true,
+            x_align: Clutter.ActorAlign.END,
+        });
+        sevenDayHeader.add_child(sevenDayPercent);
+        sevenDayBox.add_child(sevenDayHeader);
+
+        const sevenDayProgressBg = new St.Widget({
+            style_class: 'claude-progress-bg',
+        });
+        const sevenDayProgressBar = new St.Widget({
+            style_class: 'claude-progress-bar usage-low',
+        });
+        sevenDayProgressBg.add_child(sevenDayProgressBar);
+        sevenDayBox.add_child(sevenDayProgressBg);
+
+        const sevenDayResetLabel = new St.Label({
+            text: 'Resets: ...',
+            style_class: 'claude-reset-label',
+        });
+        sevenDayBox.add_child(sevenDayResetLabel);
+
+        const sevenDayItem = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+        });
+        sevenDayItem.add_child(sevenDayBox);
+        this.menu.addMenuItem(sevenDayItem);
+
+        return {
+            fiveHourPercent,
+            fiveHourProgressBar,
+            fiveHourResetLabel,
+            sevenDayPercent,
+            sevenDayProgressBar,
+            sevenDayResetLabel,
+        };
+    }
+
+    _updateAccountMenu(account, data) {
+        if (!account.menuWidgets)
+            return;
+
+        const w = account.menuWidgets;
         const fiveHour = data.five_hour?.utilization ?? 0;
         const sevenDay = data.seven_day?.utilization ?? 0;
 
-        this._label.set_text(`${Math.round(fiveHour)}%`);
+        w.fiveHourPercent.set_text(`${fiveHour.toFixed(1)}%`);
+        this._updateProgressBar(w.fiveHourProgressBar, fiveHour);
 
-        this._updatePanelProgressBar(fiveHour);
-
-        this._fiveHourPercent.set_text(`${fiveHour.toFixed(1)}%`);
-        this._updateProgressBar(this._fiveHourProgressBar, fiveHour);
-
-        this._sevenDayPercent.set_text(`${sevenDay.toFixed(1)}%`);
-        this._updateProgressBar(this._sevenDayProgressBar, sevenDay);
+        w.sevenDayPercent.set_text(`${sevenDay.toFixed(1)}%`);
+        this._updateProgressBar(w.sevenDayProgressBar, sevenDay);
 
         if (data.five_hour?.resets_at) {
-            this._fiveHourResetLabel.set_text(
+            w.fiveHourResetLabel.set_text(
                 `Resets in ${this._formatResetTime(data.five_hour.resets_at)}`
             );
         }
 
         if (data.seven_day?.resets_at) {
-            this._sevenDayResetLabel.set_text(
+            w.sevenDayResetLabel.set_text(
                 `Resets in ${this._formatResetTime(data.seven_day.resets_at)}`
             );
         }
     }
+
+    // --- Panel UI ---
+
+    _updatePanelFromAccounts() {
+        // Find the account with highest 5-hour utilization among non-expired accounts with data
+        let worstAccount = null;
+        let worstUsage = -1;
+
+        for (const account of this._accounts) {
+            if (account.isTokenExpired || !account.cachedData)
+                continue;
+            const usage = account.cachedData.five_hour?.utilization ?? 0;
+            if (usage > worstUsage) {
+                worstUsage = usage;
+                worstAccount = account;
+            }
+        }
+
+        // If all expired/no data, try cached data from expired accounts
+        if (!worstAccount) {
+            for (const account of this._accounts) {
+                if (!account.cachedData)
+                    continue;
+                const usage = account.cachedData.five_hour?.utilization ?? 0;
+                if (usage > worstUsage) {
+                    worstUsage = usage;
+                    worstAccount = account;
+                }
+            }
+        }
+
+        if (worstAccount) {
+            const usage = worstUsage;
+            const suffix = worstAccount.isTokenExpired ? ' (cached)' : '';
+
+            if (this._accounts.length === 1) {
+                this._label.set_text(`${Math.round(usage)}%${suffix}`);
+            } else {
+                this._label.set_text(`${worstAccount.label}: ${Math.round(usage)}%${suffix}`);
+            }
+
+            this._updatePanelProgressBar(usage);
+        } else {
+            this._label.set_text('...');
+            this._updatePanelProgressBar(0);
+        }
+
+        // Global expired state
+        const allExpired = this._accounts.length > 0 &&
+            this._accounts.every(a => a.isTokenExpired);
+        this._setGlobalExpiredState(allExpired);
+    }
+
+    _setAccountExpired(account, expired) {
+        account.isTokenExpired = expired;
+
+        if (!account.menuWidgets)
+            return;
+
+        if (expired) {
+            if (account.cachedData) {
+                const fiveHour = account.cachedData.five_hour?.utilization ?? 0;
+                account.menuWidgets.fiveHourPercent.set_text(`${fiveHour.toFixed(1)}% (cached)`);
+            } else {
+                account.menuWidgets.fiveHourPercent.set_text('Token expired');
+            }
+        }
+    }
+
+    _setGlobalExpiredState(allExpired) {
+        this._allTokensExpired = allExpired;
+        const effectName = 'expired-desaturate';
+
+        if (allExpired) {
+            if (!this._icon.get_effect(effectName)) {
+                this._icon.add_effect(new Clutter.DesaturateEffect({factor: 1.0, name: effectName}));
+            }
+            this._icon.set_opacity(128);
+            this._updateExpiredVisibility();
+        } else {
+            this._icon.remove_effect_by_name(effectName);
+            this._icon.set_opacity(255);
+            this.show();
+        }
+    }
+
+    _updateExpiredVisibility() {
+        if (this._allTokensExpired && this._settings.get_boolean('hide-on-expired')) {
+            this.hide();
+        } else {
+            this.show();
+        }
+    }
+
+    // --- Progress bars ---
 
     _updatePanelProgressBar(usage) {
         const maxWidth = 50;
@@ -475,6 +727,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         }
     }
 
+    // --- Utilities ---
+
     _formatResetTime(isoString) {
         try {
             const resetDate = new Date(isoString);
@@ -502,9 +756,11 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     }
 
     destroy() {
-        this._stopCredentialsMonitor();
-        this._cachedData = null;
         this._stopTimer();
+        for (const account of this._accounts) {
+            account.destroy();
+        }
+        this._accounts = [];
         if (this._session) {
             this._session.abort();
             this._session = null;

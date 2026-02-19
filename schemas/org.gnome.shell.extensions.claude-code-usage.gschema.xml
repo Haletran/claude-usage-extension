@@ -31,5 +31,15 @@
       <summary>Hide on expired token</summary>
       <description>Hide the indicator when the OAuth token has expired</description>
     </key>
+    <key name="extra-accounts" type="as">
+      <default>[]</default>
+      <summary>Extra account config directories</summary>
+      <description>Manually added config directory paths to monitor. Auto-detected directories (~/.claude*/) are always included.</description>
+    </key>
+    <key name="account-labels" type="as">
+      <default>[]</default>
+      <summary>Account custom labels</summary>
+      <description>Custom labels in format 'path|label'. Example: '/home/user/.claude-work|Work'</description>
+    </key>
   </schema>
 </schemalist>
