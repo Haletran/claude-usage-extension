@@ -34,18 +34,16 @@
 .claude-section-title {
     font-size: 13px;
     font-weight: 600;
-    color: #e0e0e0;
 }
 
 .claude-percent-label {
     font-size: 13px;
     font-weight: bold;
-    color: #ffffff;
 }
 
 /* Progress bar styles */
 .claude-progress-bg {
-    background-color: rgba(255, 255, 255, 0.1);
+    background-color: rgba(128, 128, 128, 0.2);
     border-radius: 4px;
     height: 8px;
     width: 200px;
@@ -77,7 +75,7 @@
 /* Reset label styles */
 .claude-reset-label {
     font-size: 11px;
-    color: #a0a0a0;
+    opacity: 0.6;
 }
 
 /* Footer styles */
@@ -112,6 +110,6 @@
 .claude-account-header-label {
     font-size: 13px;
     font-weight: bold;
-    color: #cc9544;
+    color: #b37a2e;
     margin-top: 2px;
 }
