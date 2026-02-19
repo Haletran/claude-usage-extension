@@ -22,6 +22,11 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._settings = settings;
         this._openPreferences = openPreferences;
         this._session = this._createSession();
+        this._isTokenExpired = false;
+        this._cachedData = null;
+        this._credentialsMonitor = null;
+        this._credentialsMonitorId = null;
+        this._debounceTimerId = null;
 
         this._box = new St.BoxLayout({
             style_class: 'panel-status-menu-box',
@@ -72,11 +77,14 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 this._recreateSession();
             } else if (key === 'icon-style') {
                 this._updateIconStyle();
+            } else if (key === 'hide-on-expired') {
+                this._updateExpiredVisibility();
             }
         });
 
         this._refreshUsage();
         this._startTimer();
+        this._startCredentialsMonitor();
     }
 
     _updateDisplayMode() {
@@ -259,6 +267,89 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._startTimer();
     }
 
+    _startCredentialsMonitor() {
+        try {
+            const configDir = GLib.getenv('CLAUDE_CONFIG_DIR') ??
+                GLib.build_filenamev([GLib.get_home_dir(), '.claude']);
+            const credentialsPath = GLib.build_filenamev([
+                configDir,
+                '.credentials.json',
+            ]);
+            const file = Gio.File.new_for_path(credentialsPath);
+            this._credentialsMonitor = file.monitor_file(Gio.FileMonitorFlags.NONE, null);
+            this._credentialsMonitorId = this._credentialsMonitor.connect('changed', (monitor, changedFile, otherFile, eventType) => {
+                if (eventType === Gio.FileMonitorEvent.CHANGED ||
+                    eventType === Gio.FileMonitorEvent.CHANGES_DONE_HINT) {
+                    this._debouncedRefresh();
+                }
+            });
+        } catch (e) {
+            console.error('Claude Usage: Failed to start credentials monitor:', e.message);
+        }
+    }
+
+    _debouncedRefresh() {
+        if (this._debounceTimerId) {
+            GLib.source_remove(this._debounceTimerId);
+            this._debounceTimerId = null;
+        }
+        this._debounceTimerId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, () => {
+            this._debounceTimerId = null;
+            this._refreshUsage();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _stopCredentialsMonitor() {
+        if (this._debounceTimerId) {
+            GLib.source_remove(this._debounceTimerId);
+            this._debounceTimerId = null;
+        }
+        if (this._credentialsMonitorId && this._credentialsMonitor) {
+            this._credentialsMonitor.disconnect(this._credentialsMonitorId);
+            this._credentialsMonitorId = null;
+        }
+        if (this._credentialsMonitor) {
+            this._credentialsMonitor.cancel();
+            this._credentialsMonitor = null;
+        }
+    }
+
+    _setExpiredState(expired) {
+        this._isTokenExpired = expired;
+        const effectName = 'expired-desaturate';
+
+        if (expired) {
+            if (!this._icon.get_effect(effectName)) {
+                this._icon.add_effect(new Clutter.DesaturateEffect({factor: 1.0, name: effectName}));
+            }
+            this._icon.set_opacity(128);
+
+            if (this._cachedData) {
+                const fiveHour = this._cachedData.five_hour?.utilization ?? 0;
+                this._label.set_text(`${Math.round(fiveHour)}% (cached)`);
+                this._fiveHourPercent.set_text(`${fiveHour.toFixed(1)}% (cached)`);
+            } else {
+                this._label.set_text('Expired');
+                this._fiveHourPercent.set_text('Token expired');
+            }
+
+            this._updateExpiredVisibility();
+        } else {
+            this._icon.remove_effect_by_name(effectName);
+            this._icon.set_opacity(255);
+            this.show();
+        }
+    }
+
+    _updateExpiredVisibility() {
+        if (this._isTokenExpired && this._settings.get_boolean('hide-on-expired')) {
+            this.hide();
+        } else {
+            this.show();
+        }
+    }
+
     _refreshUsage() {
         const configDir = GLib.getenv('CLAUDE_CONFIG_DIR') ??
             GLib.build_filenamev([GLib.get_home_dir(), '.claude']);
@@ -305,6 +396,11 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 try {
                     const bytes = session.send_and_read_finish(result);
 
+                    if (message.status_code === 401) {
+                        this._setExpiredState(true);
+                        return;
+                    }
+
                     if (message.status_code !== 200) {
                         this._label.set_text('Error');
                         this._fiveHourPercent.set_text(`HTTP ${message.status_code}`);
@@ -314,6 +410,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                     const decoder = new TextDecoder('utf-8');
                     const data = JSON.parse(decoder.decode(bytes.get_data()));
 
+                    this._cachedData = data;
+                    this._setExpiredState(false);
                     this._updateDisplay(data);
                 } catch (e) {
                     console.error('Claude Usage: Failed to fetch usage:', e.message);
@@ -404,6 +502,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     }
 
     destroy() {
+        this._stopCredentialsMonitor();
+        this._cachedData = null;
         this._stopTimer();
         if (this._session) {
             this._session.abort();

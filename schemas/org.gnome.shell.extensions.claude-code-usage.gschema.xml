@@ -26,5 +26,10 @@
       <summary>Proxy URL</summary>
       <description>HTTP proxy URL (e.g., http://localhost:11809). Leave empty to use no proxy.</description>
     </key>
+    <key name="hide-on-expired" type="b">
+      <default>false</default>
+      <summary>Hide on expired token</summary>
+      <description>Hide the indicator when the OAuth token has expired</description>
+    </key>
   </schema>
 </schemalist>

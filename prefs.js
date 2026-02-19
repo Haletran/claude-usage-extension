@@ -100,6 +100,18 @@ export default class ClaudeUsagePreferences extends ExtensionPreferences {
         );
         displayGroup.add(showIconRow);
 
+        const hideOnExpiredRow = new Adw.SwitchRow({
+            title: 'Hide on Expired Token',
+            subtitle: 'Hide the indicator when the OAuth token has expired',
+        });
+        settings.bind(
+            'hide-on-expired',
+            hideOnExpiredRow,
+            'active',
+            Gio.SettingsBindFlags.DEFAULT
+        );
+        displayGroup.add(hideOnExpiredRow);
+
         const networkGroup = new Adw.PreferencesGroup({
             title: 'Network',
             description: 'Configure network settings',
