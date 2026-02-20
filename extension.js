@@ -105,6 +105,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 this._recreateSession();
             } else if (key === 'icon-style') {
                 this._updateIconStyle();
+                this._updatePanelFromAccounts();
             } else if (key === 'hide-on-expired') {
                 this._updateExpiredVisibility();
             } else if (key === 'extra-accounts' || key === 'account-labels') {
@@ -761,9 +762,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 this._box.add_child(bg);
                 this._pinnedPanelWidgets.push(bg);
 
-                const maxWidth = 50;
-                const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * maxWidth);
-                bar.set_width(width);
+                this._updatePanelProgressBar(usage, bar);
             }
 
             // Text and both modes: show percentage text
@@ -834,10 +833,28 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
     // --- Progress bars ---
 
-    _updatePanelProgressBar(usage) {
+    _updatePanelProgressBar(usage, bar = null) {
+        const targetBar = bar ?? this._panelProgressBar;
         const maxWidth = 50;
         const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * maxWidth);
-        this._panelProgressBar.set_width(width);
+        targetBar.set_width(width);
+
+        targetBar.remove_style_class_name('usage-low');
+        targetBar.remove_style_class_name('usage-medium');
+        targetBar.remove_style_class_name('usage-high');
+        targetBar.remove_style_class_name('usage-critical');
+
+        if (this._settings.get_string('icon-style') === 'color') {
+            if (usage >= 90) {
+                targetBar.add_style_class_name('usage-critical');
+            } else if (usage >= 70) {
+                targetBar.add_style_class_name('usage-high');
+            } else if (usage >= 40) {
+                targetBar.add_style_class_name('usage-medium');
+            } else {
+                targetBar.add_style_class_name('usage-low');
+            }
+        }
     }
 
     _updateProgressBar(progressBar, usage) {
