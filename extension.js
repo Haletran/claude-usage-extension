@@ -108,6 +108,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 this._updateExpiredVisibility();
             } else if (key === 'extra-accounts' || key === 'account-labels') {
                 this._rebuildAccounts();
+            } else if (key === 'panel-account-mode' || key === 'pinned-accounts') {
+                this._updatePanelFromAccounts();
             }
         });
 
@@ -608,41 +610,61 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     // --- Panel UI ---
 
     _updatePanelFromAccounts() {
-        // Find the account with highest 5-hour utilization among non-expired accounts with data
-        let worstAccount = null;
-        let worstUsage = -1;
+        // Single account: simple display, no mode dispatch
+        if (this._accounts.length <= 1) {
+            this._updatePanelSingleAccount('highest');
+        } else {
+            const mode = this._settings.get_string('panel-account-mode');
+            if (mode === 'pinned')
+                this._updatePanelPinned();
+            else
+                this._updatePanelSingleAccount(mode);
+        }
 
+        // Global expired state
+        const allExpired = this._accounts.length > 0 &&
+            this._accounts.every(a => a.isTokenExpired);
+        this._setGlobalExpiredState(allExpired);
+    }
+
+    _updatePanelSingleAccount(mode) {
+        const isLowest = mode === 'lowest';
+        let selectedAccount = null;
+        let selectedUsage = isLowest ? Infinity : -1;
+
+        // First pass: non-expired accounts with data
         for (const account of this._accounts) {
             if (account.isTokenExpired || !account.cachedData)
                 continue;
             const usage = account.cachedData.five_hour?.utilization ?? 0;
-            if (usage > worstUsage) {
-                worstUsage = usage;
-                worstAccount = account;
+            if (isLowest ? usage < selectedUsage : usage > selectedUsage) {
+                selectedUsage = usage;
+                selectedAccount = account;
             }
         }
 
-        // If all expired/no data, try cached data from expired accounts
-        if (!worstAccount) {
+        // Fallback: expired accounts with cached data
+        if (!selectedAccount) {
+            selectedUsage = isLowest ? Infinity : -1;
             for (const account of this._accounts) {
                 if (!account.cachedData)
                     continue;
                 const usage = account.cachedData.five_hour?.utilization ?? 0;
-                if (usage > worstUsage) {
-                    worstUsage = usage;
-                    worstAccount = account;
+                if (isLowest ? usage < selectedUsage : usage > selectedUsage) {
+                    selectedUsage = usage;
+                    selectedAccount = account;
                 }
             }
         }
 
-        if (worstAccount) {
-            const usage = worstUsage;
-            const suffix = worstAccount.isTokenExpired ? ' (cached)' : '';
+        if (selectedAccount) {
+            const usage = selectedUsage;
+            const suffix = selectedAccount.isTokenExpired ? ' (cached)' : '';
 
             if (this._accounts.length === 1) {
                 this._label.set_text(`${Math.round(usage)}%${suffix}`);
             } else {
-                this._label.set_text(`${worstAccount.label}: ${Math.round(usage)}%${suffix}`);
+                this._label.set_text(`${selectedAccount.label}: ${Math.round(usage)}%${suffix}`);
             }
 
             this._updatePanelProgressBar(usage);
@@ -650,11 +672,53 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             this._label.set_text('...');
             this._updatePanelProgressBar(0);
         }
+    }
 
-        // Global expired state
-        const allExpired = this._accounts.length > 0 &&
-            this._accounts.every(a => a.isTokenExpired);
-        this._setGlobalExpiredState(allExpired);
+    _updatePanelPinned() {
+        const pinnedPaths = this._settings.get_strv('pinned-accounts');
+
+        // Clean up stale pinned paths
+        const validPaths = pinnedPaths.filter(p =>
+            this._accounts.some(a => a.configDir === p)
+        );
+        if (validPaths.length !== pinnedPaths.length)
+            this._settings.set_strv('pinned-accounts', validPaths);
+
+        // Filter accounts to pinned ones
+        const pinnedAccounts = this._accounts.filter(a =>
+            validPaths.includes(a.configDir)
+        );
+
+        if (pinnedAccounts.length === 0) {
+            this._label.set_text('No pins');
+            this._updatePanelProgressBar(0);
+            return;
+        }
+
+        // Build label: "work: 45% | personal: 20%"
+        const parts = [];
+        let maxUsage = 0;
+
+        for (const account of pinnedAccounts) {
+            const data = account.cachedData;
+            if (!data) {
+                if (account.isTokenExpired)
+                    parts.push(`${account.label}: expired`);
+                else
+                    parts.push(`${account.label}: ...`);
+                continue;
+            }
+
+            const usage = data.five_hour?.utilization ?? 0;
+            if (usage > maxUsage)
+                maxUsage = usage;
+
+            const suffix = account.isTokenExpired ? '*' : '';
+            parts.push(`${account.label}: ${Math.round(usage)}%${suffix}`);
+        }
+
+        this._label.set_text(parts.join(' | '));
+        this._updatePanelProgressBar(maxUsage);
     }
 
     _setAccountExpired(account, expired) {

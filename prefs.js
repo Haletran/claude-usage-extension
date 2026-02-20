@@ -41,13 +41,42 @@ export default class ClaudeUsagePreferences extends ExtensionPreferences {
         generalGroup.add(refreshRow);
 
         // --- Accounts group ---
-        this._buildAccountsGroup(page, settings);
+        const accounts = this._discoverAccountPaths(settings);
+        const isMultiAccount = accounts.length >= 2;
+        this._buildAccountsGroup(page, settings, accounts, isMultiAccount);
 
         const displayGroup = new Adw.PreferencesGroup({
             title: 'Panel Display',
             description: 'Configure how usage is shown in the top panel',
         });
         page.add(displayGroup);
+
+        // Panel Account Mode (only for 2+ accounts)
+        if (isMultiAccount) {
+            const accountModeRow = new Adw.ComboRow({
+                title: 'Panel Account Mode',
+                subtitle: 'Which account to show in the top panel',
+            });
+
+            const accountModeModel = new Gtk.StringList();
+            accountModeModel.append('Highest usage');
+            accountModeModel.append('Lowest usage');
+            accountModeModel.append('Pinned accounts');
+            accountModeRow.set_model(accountModeModel);
+
+            const currentAccountMode = settings.get_string('panel-account-mode');
+            const accountModeIndex = currentAccountMode === 'lowest' ? 1
+                : currentAccountMode === 'pinned' ? 2 : 0;
+            accountModeRow.set_selected(accountModeIndex);
+
+            accountModeRow.connect('notify::selected', () => {
+                const selected = accountModeRow.get_selected();
+                const modes = ['highest', 'lowest', 'pinned'];
+                settings.set_string('panel-account-mode', modes[selected]);
+            });
+
+            displayGroup.add(accountModeRow);
+        }
 
         const displayModeRow = new Adw.ComboRow({
             title: 'Display Mode',
@@ -142,16 +171,14 @@ export default class ClaudeUsagePreferences extends ExtensionPreferences {
         networkGroup.add(proxyHint);
     }
 
-    _buildAccountsGroup(page, settings) {
+    _buildAccountsGroup(page, settings, accounts, isMultiAccount) {
         const accountsGroup = new Adw.PreferencesGroup({
             title: 'Accounts',
             description: 'Directories matching ~/.claude-*/ are detected automatically',
         });
         page.add(accountsGroup);
 
-        const accounts = this._discoverAccountPaths(settings);
         const accountLabels = settings.get_strv('account-labels');
-        const extraAccounts = settings.get_strv('extra-accounts');
 
         for (const account of accounts) {
             const currentLabel = this._getLabelForPath(account.path, accountLabels) ?? account.defaultLabel;
@@ -166,6 +193,10 @@ export default class ClaudeUsagePreferences extends ExtensionPreferences {
                 const newLabel = row.get_text().trim();
                 this._setLabelForPath(settings, account.path, newLabel);
             });
+
+            // Pin button (only for 2+ accounts)
+            if (isMultiAccount)
+                this._addPinButton(row, account.path, settings);
 
             // Add delete button for manually added accounts only
             if (account.isManual) {
@@ -198,7 +229,7 @@ export default class ClaudeUsagePreferences extends ExtensionPreferences {
             valign: Gtk.Align.CENTER,
         }));
         addRow.connect('activated', () => {
-            this._showAddAccountDialog(page.get_root(), settings, accountsGroup, addRow);
+            this._showAddAccountDialog(page.get_root(), settings, accountsGroup, addRow, isMultiAccount);
         });
         accountsGroup.add(addRow);
     }
@@ -305,7 +336,56 @@ export default class ClaudeUsagePreferences extends ExtensionPreferences {
         settings.set_strv('account-labels', filtered);
     }
 
-    _showAddAccountDialog(parentWindow, settings, accountsGroup, addRow) {
+    _addPinButton(row, accountPath, settings) {
+        const pinned = settings.get_strv('pinned-accounts');
+        const isPinned = pinned.includes(accountPath);
+
+        const pinButton = new Gtk.ToggleButton({
+            icon_name: 'view-pin-symbolic',
+            valign: Gtk.Align.CENTER,
+            css_classes: ['flat'],
+            active: isPinned,
+        });
+
+        const updateOpacityAndTooltip = () => {
+            const mode = settings.get_string('panel-account-mode');
+            if (mode === 'pinned') {
+                pinButton.set_opacity(1.0);
+                pinButton.set_tooltip_text(
+                    pinButton.get_active() ? 'Unpin from panel' : 'Pin to panel'
+                );
+            } else {
+                pinButton.set_opacity(0.5);
+                pinButton.set_tooltip_text('Switch to "Pinned accounts" mode to use pins');
+            }
+        };
+        updateOpacityAndTooltip();
+
+        pinButton.connect('toggled', () => {
+            const current = settings.get_strv('pinned-accounts');
+            if (pinButton.get_active()) {
+                if (!current.includes(accountPath)) {
+                    current.push(accountPath);
+                    settings.set_strv('pinned-accounts', current);
+                }
+            } else {
+                const updated = current.filter(p => p !== accountPath);
+                settings.set_strv('pinned-accounts', updated);
+            }
+            updateOpacityAndTooltip();
+        });
+
+        const modeChangedId = settings.connect('changed::panel-account-mode', () => {
+            updateOpacityAndTooltip();
+        });
+        row.connect('destroy', () => {
+            settings.disconnect(modeChangedId);
+        });
+
+        row.add_suffix(pinButton);
+    }
+
+    _showAddAccountDialog(parentWindow, settings, accountsGroup, addRow, isMultiAccount) {
         const dialog = new Adw.AlertDialog({
             heading: 'Add Account',
             body: 'Enter the full path to a Claude config directory containing .credentials.json',
@@ -361,6 +441,10 @@ export default class ClaudeUsagePreferences extends ExtensionPreferences {
                 const newLabel = row.get_text().trim();
                 this._setLabelForPath(settings, resolved, newLabel);
             });
+
+            // Pin button (adding a new account means we now have 2+ accounts)
+            if (isMultiAccount)
+                this._addPinButton(row, resolved, settings);
 
             const deleteButton = new Gtk.Button({
                 icon_name: 'edit-delete-symbolic',

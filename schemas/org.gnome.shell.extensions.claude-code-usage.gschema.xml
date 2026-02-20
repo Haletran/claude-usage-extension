@@ -41,5 +41,15 @@
       <summary>Account custom labels</summary>
       <description>Custom labels in format 'path|label'. Example: '/home/user/.claude-work|Work'</description>
     </key>
+    <key name="panel-account-mode" type="s">
+      <default>'highest'</default>
+      <summary>Panel account selection mode</summary>
+      <description>Which account to show: 'highest', 'lowest', or 'pinned'</description>
+    </key>
+    <key name="pinned-accounts" type="as">
+      <default>[]</default>
+      <summary>Pinned account config directories</summary>
+      <description>Config directory paths of accounts to always show when mode is 'pinned'</description>
+    </key>
   </schema>
 </schemalist>
