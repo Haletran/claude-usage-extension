@@ -56,6 +56,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._session = this._createSession();
         this._accounts = [];
         this._allTokensExpired = false;
+        this._pinnedPanelWidgets = null;
 
         this._box = new St.BoxLayout({
             style_class: 'panel-status-menu-box',
@@ -89,7 +90,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
         this.add_child(this._box);
 
-        this._updateDisplayMode();
+        this._applyDisplayMode();
         this._updateIconVisibility();
         this._updateIconStyle();
 
@@ -118,6 +119,13 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     }
 
     _updateDisplayMode() {
+        this._applyDisplayMode();
+        // Re-render panel if accounts are loaded (handles pinned mode rebuild)
+        if (this._accounts && this._accounts.length > 0)
+            this._updatePanelFromAccounts();
+    }
+
+    _applyDisplayMode() {
         const mode = this._settings.get_string('display-mode');
         if (mode === 'bar') {
             this._panelProgressBg.show();
@@ -627,7 +635,20 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._setGlobalExpiredState(allExpired);
     }
 
+    _clearPinnedPanelWidgets() {
+        if (this._pinnedPanelWidgets) {
+            for (const widget of this._pinnedPanelWidgets) {
+                this._box.remove_child(widget);
+                widget.destroy();
+            }
+            this._pinnedPanelWidgets = null;
+        }
+    }
+
     _updatePanelSingleAccount(mode) {
+        this._clearPinnedPanelWidgets();
+        this._applyDisplayMode();
+
         const isLowest = mode === 'lowest';
         let selectedAccount = null;
         let selectedUsage = isLowest ? Infinity : -1;
@@ -675,50 +696,99 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     }
 
     _updatePanelPinned() {
-        const pinnedPaths = this._settings.get_strv('pinned-accounts');
+        // Hide default single-account widgets
+        this._label.hide();
+        this._panelProgressBg.hide();
 
-        // Clean up stale pinned paths
+        // Clean previous pinned widgets
+        this._clearPinnedPanelWidgets();
+
+        const pinnedPaths = this._settings.get_strv('pinned-accounts');
         const validPaths = pinnedPaths.filter(p =>
             this._accounts.some(a => a.configDir === p)
         );
         if (validPaths.length !== pinnedPaths.length)
             this._settings.set_strv('pinned-accounts', validPaths);
 
-        // Filter accounts to pinned ones
         const pinnedAccounts = this._accounts.filter(a =>
             validPaths.includes(a.configDir)
         );
 
         if (pinnedAccounts.length === 0) {
+            this._label.show();
             this._label.set_text('No pins');
-            this._updatePanelProgressBar(0);
+            this._label.set_style('margin-left: 0;');
             return;
         }
 
-        // Build label: "work: 45% | personal: 20%"
-        const parts = [];
-        let maxUsage = 0;
+        const displayMode = this._settings.get_string('display-mode');
+        this._pinnedPanelWidgets = [];
 
-        for (const account of pinnedAccounts) {
-            const data = account.cachedData;
-            if (!data) {
-                if (account.isTokenExpired)
-                    parts.push(`${account.label}: expired`);
-                else
-                    parts.push(`${account.label}: ...`);
-                continue;
+        pinnedAccounts.forEach((account, index) => {
+            // Separator between accounts
+            if (index > 0) {
+                const sep = new St.Label({
+                    text: '|',
+                    y_align: Clutter.ActorAlign.CENTER,
+                    style_class: 'claude-usage-label',
+                });
+                this._box.add_child(sep);
+                this._pinnedPanelWidgets.push(sep);
             }
 
-            const usage = data.five_hour?.utilization ?? 0;
-            if (usage > maxUsage)
-                maxUsage = usage;
-
+            const data = account.cachedData;
+            const usage = data?.five_hour?.utilization ?? 0;
             const suffix = account.isTokenExpired ? '*' : '';
-            parts.push(`${account.label}: ${Math.round(usage)}%${suffix}`);
-        }
 
-        this._label.set_text(parts.join(' | '));
-        this._updatePanelProgressBar(maxUsage);
+            // Bar and both modes: show name label + progress bar
+            if (displayMode === 'bar' || displayMode === 'both') {
+                const nameLabel = new St.Label({
+                    text: account.label,
+                    y_align: Clutter.ActorAlign.CENTER,
+                    style_class: 'claude-usage-label',
+                });
+                this._box.add_child(nameLabel);
+                this._pinnedPanelWidgets.push(nameLabel);
+
+                const bg = new St.Widget({
+                    style_class: 'claude-panel-progress-bg',
+                    y_align: Clutter.ActorAlign.CENTER,
+                });
+                const bar = new St.Widget({
+                    style_class: 'claude-panel-progress-bar',
+                });
+                bg.add_child(bar);
+                this._box.add_child(bg);
+                this._pinnedPanelWidgets.push(bg);
+
+                const maxWidth = 50;
+                const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * maxWidth);
+                bar.set_width(width);
+            }
+
+            // Text and both modes: show percentage text
+            if (displayMode === 'both' || displayMode === 'text') {
+                let textContent;
+                if (!data) {
+                    textContent = account.isTokenExpired
+                        ? `${account.label}: exp` : `${account.label}: ...`;
+                } else if (displayMode === 'text') {
+                    textContent = `${account.label}: ${Math.round(usage)}%${suffix}`;
+                } else {
+                    textContent = `${Math.round(usage)}%${suffix}`;
+                }
+
+                const textLabel = new St.Label({
+                    text: textContent,
+                    y_align: Clutter.ActorAlign.CENTER,
+                    style_class: 'claude-usage-label',
+                });
+                if (displayMode === 'both')
+                    textLabel.set_style('margin-left: 6px;');
+                this._box.add_child(textLabel);
+                this._pinnedPanelWidgets.push(textLabel);
+            }
+        });
     }
 
     _setAccountExpired(account, expired) {
@@ -821,6 +891,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
     destroy() {
         this._stopTimer();
+        this._clearPinnedPanelWidgets();
         for (const account of this._accounts) {
             account.destroy();
         }
