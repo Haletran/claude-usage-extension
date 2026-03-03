@@ -107,3 +107,8 @@
     font-style: italic;
     color: #808080;
 }
+
+.claude-success-flash {
+    color: #22c55e;
+    transition: color 150ms ease-out;
+}
