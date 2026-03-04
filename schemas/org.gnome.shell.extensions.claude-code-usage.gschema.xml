@@ -26,5 +26,20 @@
       <summary>Proxy URL</summary>
       <description>HTTP proxy URL (e.g., http://localhost:11809). Leave empty to use no proxy.</description>
     </key>
+    <key name="access-token" type="s">
+      <default>''</default>
+      <summary>OAuth access token</summary>
+      <description>Extension's own OAuth access token obtained via PKCE flow.</description>
+    </key>
+    <key name="refresh-token" type="s">
+      <default>''</default>
+      <summary>OAuth refresh token</summary>
+      <description>Extension's own OAuth refresh token for renewing the access token.</description>
+    </key>
+    <key name="expires-at" type="x">
+      <default>0</default>
+      <summary>Token expiry timestamp</summary>
+      <description>Millisecond timestamp when the access token expires.</description>
+    </key>
   </schema>
 </schemalist>

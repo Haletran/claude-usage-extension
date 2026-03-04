@@ -12,6 +12,9 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const API_URL = 'https://api.anthropic.com/api/oauth/usage';
+const TOKEN_URL = 'https://api.anthropic.com/v1/oauth/token';
+const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
 const ClaudeUsageIndicator = GObject.registerClass(
 class ClaudeUsageIndicator extends PanelMenu.Button {
@@ -259,7 +262,70 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._startTimer();
     }
 
+    _setErrorState(msg) {
+        this._label.set_text('Error');
+        this._fiveHourPercent.set_text(msg);
+    }
+
     _refreshUsage() {
+        if (this._fetching) return;
+        this._fetching = true;
+        const ownToken = this._settings.get_string('access-token');
+        if (ownToken) {
+            const expiresAt = this._settings.get_int64('expires-at');
+            if (Date.now() >= expiresAt - TOKEN_EXPIRY_BUFFER_MS) {
+                this._refreshOwnToken();
+            } else {
+                this._fetchUsage(ownToken);
+            }
+        } else {
+            this._loadCredentialsAndFetch();
+        }
+    }
+
+    _refreshOwnToken() {
+        const refreshToken = this._settings.get_string('refresh-token');
+        if (!refreshToken) {
+            this._fetching = false;
+            this._setErrorState('Not connected');
+            return;
+        }
+
+        const body = [
+            'grant_type=refresh_token',
+            `refresh_token=${encodeURIComponent(refreshToken)}`,
+            `client_id=${CLIENT_ID}`,
+        ].join('&');
+
+        const message = Soup.Message.new('POST', TOKEN_URL);
+        message.request_headers.append('Content-Type', 'application/x-www-form-urlencoded');
+        message.set_request_body_from_bytes(
+            null,
+            new GLib.Bytes(new TextEncoder().encode(body))
+        );
+
+        this._session.send_and_read_async(message, GLib.PRIORITY_DEFAULT, null, (session, result) => {
+            try {
+                const bytes = session.send_and_read_finish(result);
+                if (message.status_code !== 200) {
+                    this._fetching = false;
+                    this._setErrorState('Auth expired');
+                    return;
+                }
+                const resp = JSON.parse(new TextDecoder().decode(bytes.get_data()));
+                this._settings.set_string('access-token', resp.access_token);
+                this._settings.set_string('refresh-token', resp.refresh_token);
+                this._settings.set_int64('expires-at', Date.now() + (resp.expires_in ?? 28800) * 1000);
+                this._fetchUsage(resp.access_token);
+            } catch (e) {
+                console.error('Claude Usage: Token refresh failed:', e.message);
+                this._fetching = false;
+                this._setErrorState('Error');
+            }
+        });
+    }
+
+    _loadCredentialsAndFetch() {
         const configDir = GLib.getenv('CLAUDE_CONFIG_DIR') ??
             GLib.build_filenamev([GLib.get_home_dir(), '.claude']);
         const credentialsPath = GLib.build_filenamev([
@@ -276,6 +342,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 const token = json.claudeAiOauth?.accessToken;
 
                 if (!token) {
+                    this._fetching = false;
                     this._label.set_text('No token');
                     this._fiveHourPercent.set_text('No credentials');
                     this._sevenDayPercent.set_text('—');
@@ -285,6 +352,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 this._fetchUsage(token);
             } catch (e) {
                 console.error('Claude Usage: Failed to read credentials:', e.message);
+                this._fetching = false;
                 this._label.set_text('No token');
                 this._fiveHourPercent.set_text('No credentials');
                 this._sevenDayPercent.set_text('—');
@@ -305,9 +373,13 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 try {
                     const bytes = session.send_and_read_finish(result);
 
+                    if (message.status_code === 429) {
+                        this._fetching = false;
+                        return; // rate limited — keep last known data
+                    }
                     if (message.status_code !== 200) {
-                        this._label.set_text('Error');
-                        this._fiveHourPercent.set_text(`HTTP ${message.status_code}`);
+                        this._fetching = false;
+                        this._setErrorState(`HTTP ${message.status_code}`);
                         return;
                     }
 
@@ -315,9 +387,11 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                     const data = JSON.parse(decoder.decode(bytes.get_data()));
 
                     this._updateDisplay(data);
+                    this._fetching = false;
                 } catch (e) {
                     console.error('Claude Usage: Failed to fetch usage:', e.message);
-                    this._label.set_text('Error');
+                    this._fetching = false;
+                    this._setErrorState('Error');
                 }
             }
         );
