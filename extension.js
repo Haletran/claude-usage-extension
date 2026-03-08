@@ -13,6 +13,12 @@ import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/ex
 
 const API_URL = 'https://api.anthropic.com/api/oauth/usage';
 
+const WINDOW_DURATION = {
+    five_hour: 5 * 3600,
+    seven_day: 7 * 86400,
+    seven_day_sonnet: 7 * 86400,
+};
+
 const ClaudeUsageIndicator = GObject.registerClass(
 class ClaudeUsageIndicator extends PanelMenu.Button {
     _init(extensionPath, settings, openPreferences) {
@@ -323,40 +329,97 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         );
     }
 
+    _projectRate(utilization, resetsAt, windowKey) {
+        const windowDuration = WINDOW_DURATION[windowKey];
+        if (!windowDuration || !resetsAt) {
+            return {projected: utilization, color: 'normal'};
+        }
+
+        try {
+            const resetDate = new Date(resetsAt);
+            const now = new Date();
+            const timeUntilReset = (resetDate - now) / 1000;
+            const elapsed = windowDuration - timeUntilReset;
+
+            if (elapsed < windowDuration * 0.05) {
+                return {projected: utilization, color: 'normal'};
+            }
+
+            const projected = (utilization / elapsed) * windowDuration;
+
+            if (projected > 100) {
+                return {projected, color: 'critical'};
+            } else if (projected > 90) {
+                return {projected, color: 'warning'};
+            } else {
+                return {projected, color: 'normal'};
+            }
+        } catch (e) {
+            return {projected: utilization, color: 'normal'};
+        }
+    }
+
     _updateDisplay(data) {
         const fiveHour = data.five_hour?.utilization ?? 0;
         const sevenDay = data.seven_day?.utilization ?? 0;
+        const fiveHourResetsAt = data.five_hour?.resets_at;
+        const sevenDayResetsAt = data.seven_day?.resets_at;
+
+        const fiveHourProj = this._projectRate(fiveHour, fiveHourResetsAt, 'five_hour');
+        const sevenDayProj = this._projectRate(sevenDay, sevenDayResetsAt, 'seven_day');
 
         this._label.set_text(`${Math.round(fiveHour)}%`);
 
-        this._updatePanelProgressBar(fiveHour);
+        this._updatePanelProgressBar(fiveHour, fiveHourResetsAt, 'five_hour');
 
-        this._fiveHourPercent.set_text(`${fiveHour.toFixed(1)}%`);
-        this._updateProgressBar(this._fiveHourProgressBar, fiveHour);
+        let fiveHourText = `${fiveHour.toFixed(1)}%`;
+        if (fiveHourProj.color !== 'normal') {
+            fiveHourText += ` (proj: ${Math.round(fiveHourProj.projected)}%)`;
+        }
+        this._fiveHourPercent.set_text(fiveHourText);
+        this._updateProgressBar(this._fiveHourProgressBar, fiveHour, fiveHourResetsAt, 'five_hour');
 
-        this._sevenDayPercent.set_text(`${sevenDay.toFixed(1)}%`);
-        this._updateProgressBar(this._sevenDayProgressBar, sevenDay);
+        let sevenDayText = `${sevenDay.toFixed(1)}%`;
+        if (sevenDayProj.color !== 'normal') {
+            sevenDayText += ` (proj: ${Math.round(sevenDayProj.projected)}%)`;
+        }
+        this._sevenDayPercent.set_text(sevenDayText);
+        this._updateProgressBar(this._sevenDayProgressBar, sevenDay, sevenDayResetsAt, 'seven_day');
 
-        if (data.five_hour?.resets_at) {
+        if (fiveHourResetsAt) {
             this._fiveHourResetLabel.set_text(
-                `Resets in ${this._formatResetTime(data.five_hour.resets_at)}`
+                `Resets in ${this._formatResetTime(fiveHourResetsAt)}`
             );
         }
 
-        if (data.seven_day?.resets_at) {
+        if (sevenDayResetsAt) {
             this._sevenDayResetLabel.set_text(
-                `Resets in ${this._formatResetTime(data.seven_day.resets_at)}`
+                `Resets in ${this._formatResetTime(sevenDayResetsAt)}`
             );
         }
     }
 
-    _updatePanelProgressBar(usage) {
+    _updatePanelProgressBar(usage, resetsAt, windowKey) {
         const maxWidth = 50;
         const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * maxWidth);
         this._panelProgressBar.set_width(width);
+
+        this._panelProgressBar.remove_style_class_name('usage-low');
+        this._panelProgressBar.remove_style_class_name('usage-medium');
+        this._panelProgressBar.remove_style_class_name('usage-high');
+        this._panelProgressBar.remove_style_class_name('usage-critical');
+
+        const {color} = this._projectRate(usage, resetsAt, windowKey);
+        if (color === 'critical') {
+            this._panelProgressBar.add_style_class_name('usage-critical');
+        } else if (color === 'warning') {
+            this._panelProgressBar.add_style_class_name('usage-medium');
+        } else {
+            this._panelProgressBar.add_style_class_name('usage-low');
+        }
     }
 
-    _updateProgressBar(progressBar, usage) {
+    _updateProgressBar(progressBar, usage, resetsAt, windowKey) {
         const maxWidth = 200;
         const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * maxWidth);
         progressBar.set_width(width);
@@ -366,11 +429,10 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         progressBar.remove_style_class_name('usage-high');
         progressBar.remove_style_class_name('usage-critical');
 
-        if (usage >= 90) {
+        const {color} = this._projectRate(usage, resetsAt, windowKey);
+        if (color === 'critical') {
             progressBar.add_style_class_name('usage-critical');
-        } else if (usage >= 70) {
-            progressBar.add_style_class_name('usage-high');
-        } else if (usage >= 40) {
+        } else if (color === 'warning') {
             progressBar.add_style_class_name('usage-medium');
         } else {
             progressBar.add_style_class_name('usage-low');
