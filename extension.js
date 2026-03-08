@@ -81,6 +81,10 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             }
         });
 
+        this._fiveHourResetsAt = null;
+        this._sevenDayResetsAt = null;
+        this._countdownTimerId = null;
+
         this._refreshUsage();
         this._startTimer();
     }
@@ -365,6 +369,9 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         const fiveHourResetsAt = data.five_hour?.resets_at;
         const sevenDayResetsAt = data.seven_day?.resets_at;
 
+        this._fiveHourResetsAt = fiveHourResetsAt;
+        this._sevenDayResetsAt = sevenDayResetsAt;
+
         const fiveHourProj = this._projectRate(fiveHour, fiveHourResetsAt, 'five_hour');
         const sevenDayProj = this._projectRate(sevenDay, sevenDayResetsAt, 'seven_day');
 
@@ -386,15 +393,90 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._sevenDayPercent.set_text(sevenDayText);
         this._updateProgressBar(this._sevenDayProgressBar, sevenDay, sevenDayResetsAt, 'seven_day');
 
-        if (fiveHourResetsAt) {
-            this._fiveHourResetLabel.set_text(
-                `Resets in ${this._formatResetTime(fiveHourResetsAt)}`
-            );
+        this._updateCountdownLabels();
+        this._scheduleCountdownTick();
+    }
+
+    _updateCountdownLabels() {
+        if (this._fiveHourResetsAt) {
+            const text = this._formatResetTime(this._fiveHourResetsAt);
+            if (text === 'now') {
+                this._fiveHourResetLabel.set_text('Resetting...');
+            } else {
+                this._fiveHourResetLabel.set_text(`Resets in ${text}`);
+            }
         }
 
-        if (sevenDayResetsAt) {
-            this._sevenDayResetLabel.set_text(
-                `Resets in ${this._formatResetTime(sevenDayResetsAt)}`
+        if (this._sevenDayResetsAt) {
+            const text = this._formatResetTime(this._sevenDayResetsAt);
+            if (text === 'now') {
+                this._sevenDayResetLabel.set_text('Resetting...');
+            } else {
+                this._sevenDayResetLabel.set_text(`Resets in ${text}`);
+            }
+        }
+    }
+
+    _stopCountdownTimer() {
+        if (this._countdownTimerId) {
+            GLib.source_remove(this._countdownTimerId);
+            this._countdownTimerId = null;
+        }
+    }
+
+    _scheduleCountdownTick() {
+        this._stopCountdownTimer();
+
+        const now = new Date();
+        let minSecondsUntilReset = Infinity;
+
+        for (const resetsAt of [this._fiveHourResetsAt, this._sevenDayResetsAt]) {
+            if (!resetsAt) continue;
+            try {
+                const resetDate = new Date(resetsAt);
+                const secsLeft = (resetDate - now) / 1000;
+                if (secsLeft > 0 && secsLeft < minSecondsUntilReset) {
+                    minSecondsUntilReset = secsLeft;
+                }
+            } catch (e) {
+                // skip invalid dates
+            }
+        }
+
+        if (minSecondsUntilReset === Infinity) {
+            return;
+        }
+
+        if (minSecondsUntilReset <= 0) {
+            this._updateCountdownLabels();
+            GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
+                this._refreshUsage();
+                return GLib.SOURCE_REMOVE;
+            });
+            return;
+        }
+
+        if (minSecondsUntilReset <= 60) {
+            this._countdownTimerId = GLib.timeout_add(
+                GLib.PRIORITY_DEFAULT,
+                1000,
+                () => {
+                    this._countdownTimerId = null;
+                    this._updateCountdownLabels();
+                    this._scheduleCountdownTick();
+                    return GLib.SOURCE_REMOVE;
+                }
+            );
+        } else {
+            this._countdownTimerId = GLib.timeout_add_seconds(
+                GLib.PRIORITY_DEFAULT,
+                60,
+                () => {
+                    this._countdownTimerId = null;
+                    this._updateCountdownLabels();
+                    this._scheduleCountdownTick();
+                    return GLib.SOURCE_REMOVE;
+                }
             );
         }
     }
@@ -449,6 +531,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 return 'now';
             }
 
+            const diffSecs = Math.floor(diffMs / 1000);
             const diffMins = Math.floor(diffMs / 60000);
             const diffHours = Math.floor(diffMins / 60);
             const diffDays = Math.floor(diffHours / 24);
@@ -457,8 +540,10 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 return `${diffDays}d ${diffHours % 24}h`;
             } else if (diffHours > 0) {
                 return `${diffHours}h ${diffMins % 60}m`;
+            } else if (diffMins > 0) {
+                return `${diffMins}m ${diffSecs % 60}s`;
             } else {
-                return `${diffMins}m`;
+                return `${diffSecs}s`;
             }
         } catch (e) {
             return '—';
@@ -467,6 +552,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
     destroy() {
         this._stopTimer();
+        this._stopCountdownTimer();
         if (this._session) {
             this._session.abort();
             this._session = null;
