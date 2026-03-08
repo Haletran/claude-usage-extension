@@ -13,6 +13,12 @@ import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/ex
 
 const API_URL = 'https://api.anthropic.com/api/oauth/usage';
 
+const WINDOW_DURATION = {
+    five_hour: 5 * 3600,
+    seven_day: 7 * 86400,
+    seven_day_sonnet: 7 * 86400,
+};
+
 const ClaudeUsageIndicator = GObject.registerClass(
 class ClaudeUsageIndicator extends PanelMenu.Button {
     _init(extensionPath, settings, openPreferences) {
@@ -74,6 +80,11 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 this._updateIconStyle();
             }
         });
+
+        this._fiveHourResetsAt = null;
+        this._sevenDayResetsAt = null;
+        this._countdownTimerId = null;
+        this._prevWasLimited = {five_hour: false, seven_day: false};
 
         this._refreshUsage();
         this._startTimer();
@@ -323,40 +334,230 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         );
     }
 
+    _projectRate(utilization, resetsAt, windowKey) {
+        const windowDuration = WINDOW_DURATION[windowKey];
+        if (!windowDuration || !resetsAt) {
+            return {projected: utilization, color: 'normal'};
+        }
+
+        try {
+            const resetDate = new Date(resetsAt);
+            const now = new Date();
+            const timeUntilReset = (resetDate - now) / 1000;
+            const elapsed = windowDuration - timeUntilReset;
+
+            if (elapsed < windowDuration * 0.05) {
+                return {projected: utilization, color: 'normal'};
+            }
+
+            const projected = (utilization / elapsed) * windowDuration;
+
+            if (projected > 100) {
+                return {projected, color: 'critical'};
+            } else if (projected > 90) {
+                return {projected, color: 'warning'};
+            } else {
+                return {projected, color: 'normal'};
+            }
+        } catch (e) {
+            return {projected: utilization, color: 'normal'};
+        }
+    }
+
     _updateDisplay(data) {
         const fiveHour = data.five_hour?.utilization ?? 0;
         const sevenDay = data.seven_day?.utilization ?? 0;
+        const fiveHourResetsAt = data.five_hour?.resets_at;
+        const sevenDayResetsAt = data.seven_day?.resets_at;
+
+        this._fiveHourResetsAt = fiveHourResetsAt;
+        this._sevenDayResetsAt = sevenDayResetsAt;
+
+        const fiveHourProj = this._projectRate(fiveHour, fiveHourResetsAt, 'five_hour');
+        const sevenDayProj = this._projectRate(sevenDay, sevenDayResetsAt, 'seven_day');
 
         this._label.set_text(`${Math.round(fiveHour)}%`);
 
-        this._updatePanelProgressBar(fiveHour);
+        this._updatePanelProgressBar(fiveHour, fiveHourResetsAt, 'five_hour');
 
-        this._fiveHourPercent.set_text(`${fiveHour.toFixed(1)}%`);
-        this._updateProgressBar(this._fiveHourProgressBar, fiveHour);
+        let fiveHourText = `${fiveHour.toFixed(1)}%`;
+        if (fiveHourProj.color !== 'normal') {
+            fiveHourText += ` (proj: ${Math.round(fiveHourProj.projected)}%)`;
+        }
+        this._fiveHourPercent.set_text(fiveHourText);
+        this._updateProgressBar(this._fiveHourProgressBar, fiveHour, fiveHourResetsAt, 'five_hour');
 
-        this._sevenDayPercent.set_text(`${sevenDay.toFixed(1)}%`);
-        this._updateProgressBar(this._sevenDayProgressBar, sevenDay);
+        let sevenDayText = `${sevenDay.toFixed(1)}%`;
+        if (sevenDayProj.color !== 'normal') {
+            sevenDayText += ` (proj: ${Math.round(sevenDayProj.projected)}%)`;
+        }
+        this._sevenDayPercent.set_text(sevenDayText);
+        this._updateProgressBar(this._sevenDayProgressBar, sevenDay, sevenDayResetsAt, 'seven_day');
 
-        if (data.five_hour?.resets_at) {
-            this._fiveHourResetLabel.set_text(
-                `Resets in ${this._formatResetTime(data.five_hour.resets_at)}`
+        this._checkForReset('five_hour', fiveHour);
+        this._checkForReset('seven_day', sevenDay);
+
+        this._prevWasLimited.five_hour = fiveHour >= 100;
+        this._prevWasLimited.seven_day = sevenDay >= 100;
+
+        this._updateCountdownLabels();
+        this._scheduleCountdownTick();
+    }
+
+    _checkForReset(windowKey, currentUtilization) {
+        if (this._prevWasLimited[windowKey] && currentUtilization < 80) {
+            const label = windowKey === 'five_hour' ? '5-hour' : '7-day';
+            this._notifyReset(label);
+        }
+    }
+
+    _notifyReset(windowLabel) {
+        try {
+            Main.notify('Claude Usage', `${windowLabel} usage limit reset! You're good to go.`);
+        } catch (e) {
+            console.error('Claude Usage: Failed to show notification:', e.message);
+        }
+        this._playRacingBeep();
+    }
+
+    _playRacingBeep() {
+        try {
+            const script = `
+                play_beep() {
+                    timeout "$2" gst-launch-1.0 -q audiotestsrc freq="$1" ! audioconvert ! autoaudiosink 2>/dev/null
+                }
+                play_beep 880 0.3
+                sleep 0.3
+                play_beep 880 0.3
+                sleep 0.3
+                play_beep 880 0.3
+                sleep 0.3
+                play_beep 1320 0.9
+            `;
+            // Subprocess starts immediately; no need to await
+            Gio.Subprocess.new(
+                ['bash', '-c', script],
+                Gio.SubprocessFlags.NONE
             );
+        } catch (e) {
+            console.error('Claude Usage: Failed to play sound:', e.message);
+        }
+    }
+
+    _updateCountdownLabels() {
+        if (this._fiveHourResetsAt) {
+            const text = this._formatResetTime(this._fiveHourResetsAt);
+            if (text === 'now') {
+                this._fiveHourResetLabel.set_text('Resetting...');
+            } else {
+                this._fiveHourResetLabel.set_text(`Resets in ${text}`);
+            }
         }
 
-        if (data.seven_day?.resets_at) {
-            this._sevenDayResetLabel.set_text(
-                `Resets in ${this._formatResetTime(data.seven_day.resets_at)}`
+        if (this._sevenDayResetsAt) {
+            const text = this._formatResetTime(this._sevenDayResetsAt);
+            if (text === 'now') {
+                this._sevenDayResetLabel.set_text('Resetting...');
+            } else {
+                this._sevenDayResetLabel.set_text(`Resets in ${text}`);
+            }
+        }
+    }
+
+    _stopCountdownTimer() {
+        if (this._countdownTimerId) {
+            GLib.source_remove(this._countdownTimerId);
+            this._countdownTimerId = null;
+        }
+    }
+
+    _scheduleCountdownTick() {
+        this._stopCountdownTimer();
+
+        const now = new Date();
+        let minSecondsUntilReset = Infinity;
+
+        for (const resetsAt of [this._fiveHourResetsAt, this._sevenDayResetsAt]) {
+            if (!resetsAt) continue;
+            try {
+                const resetDate = new Date(resetsAt);
+                const secsLeft = (resetDate - now) / 1000;
+                if (secsLeft > 0 && secsLeft < minSecondsUntilReset) {
+                    minSecondsUntilReset = secsLeft;
+                }
+            } catch (e) {
+                // skip invalid dates
+            }
+        }
+
+        if (minSecondsUntilReset === Infinity) {
+            return;
+        }
+
+        if (minSecondsUntilReset <= 0) {
+            this._updateCountdownLabels();
+            if (this._prevWasLimited.five_hour) {
+                this._notifyReset('5-hour');
+                this._prevWasLimited.five_hour = false;
+            }
+            if (this._prevWasLimited.seven_day) {
+                this._notifyReset('7-day');
+                this._prevWasLimited.seven_day = false;
+            }
+            this._resetRefreshTimerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
+                this._resetRefreshTimerId = null;
+                this._refreshUsage();
+                return GLib.SOURCE_REMOVE;
+            });
+            return;
+        }
+
+        if (minSecondsUntilReset <= 60) {
+            this._countdownTimerId = GLib.timeout_add(
+                GLib.PRIORITY_DEFAULT,
+                1000,
+                () => {
+                    this._countdownTimerId = null;
+                    this._updateCountdownLabels();
+                    this._scheduleCountdownTick();
+                    return GLib.SOURCE_REMOVE;
+                }
+            );
+        } else {
+            this._countdownTimerId = GLib.timeout_add_seconds(
+                GLib.PRIORITY_DEFAULT,
+                60,
+                () => {
+                    this._countdownTimerId = null;
+                    this._updateCountdownLabels();
+                    this._scheduleCountdownTick();
+                    return GLib.SOURCE_REMOVE;
+                }
             );
         }
     }
 
-    _updatePanelProgressBar(usage) {
+    _updatePanelProgressBar(usage, resetsAt, windowKey) {
         const maxWidth = 50;
         const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * maxWidth);
         this._panelProgressBar.set_width(width);
+
+        this._panelProgressBar.remove_style_class_name('usage-low');
+        this._panelProgressBar.remove_style_class_name('usage-medium');
+        this._panelProgressBar.remove_style_class_name('usage-high');
+        this._panelProgressBar.remove_style_class_name('usage-critical');
+
+        const {color} = this._projectRate(usage, resetsAt, windowKey);
+        if (color === 'critical') {
+            this._panelProgressBar.add_style_class_name('usage-critical');
+        } else if (color === 'warning') {
+            this._panelProgressBar.add_style_class_name('usage-medium');
+        } else {
+            this._panelProgressBar.add_style_class_name('usage-low');
+        }
     }
 
-    _updateProgressBar(progressBar, usage) {
+    _updateProgressBar(progressBar, usage, resetsAt, windowKey) {
         const maxWidth = 200;
         const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * maxWidth);
         progressBar.set_width(width);
@@ -366,11 +567,10 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         progressBar.remove_style_class_name('usage-high');
         progressBar.remove_style_class_name('usage-critical');
 
-        if (usage >= 90) {
+        const {color} = this._projectRate(usage, resetsAt, windowKey);
+        if (color === 'critical') {
             progressBar.add_style_class_name('usage-critical');
-        } else if (usage >= 70) {
-            progressBar.add_style_class_name('usage-high');
-        } else if (usage >= 40) {
+        } else if (color === 'warning') {
             progressBar.add_style_class_name('usage-medium');
         } else {
             progressBar.add_style_class_name('usage-low');
@@ -387,6 +587,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 return 'now';
             }
 
+            const diffSecs = Math.floor(diffMs / 1000);
             const diffMins = Math.floor(diffMs / 60000);
             const diffHours = Math.floor(diffMins / 60);
             const diffDays = Math.floor(diffHours / 24);
@@ -395,8 +596,10 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 return `${diffDays}d ${diffHours % 24}h`;
             } else if (diffHours > 0) {
                 return `${diffHours}h ${diffMins % 60}m`;
+            } else if (diffMins > 0) {
+                return `${diffMins}m ${diffSecs % 60}s`;
             } else {
-                return `${diffMins}m`;
+                return `${diffSecs}s`;
             }
         } catch (e) {
             return '—';
@@ -405,6 +608,11 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
     destroy() {
         this._stopTimer();
+        this._stopCountdownTimer();
+        if (this._resetRefreshTimerId) {
+            GLib.source_remove(this._resetRefreshTimerId);
+            this._resetRefreshTimerId = null;
+        }
         if (this._session) {
             this._session.abort();
             this._session = null;

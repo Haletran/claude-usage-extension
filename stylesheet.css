@@ -24,6 +24,22 @@
     background-color: #ffffff;
 }
 
+.claude-panel-progress-bar.usage-low {
+    background-color: #22c55e;
+}
+
+.claude-panel-progress-bar.usage-medium {
+    background-color: #eab308;
+}
+
+.claude-panel-progress-bar.usage-high {
+    background-color: #f97316;
+}
+
+.claude-panel-progress-bar.usage-critical {
+    background-color: #ef4444;
+}
+
 /* Usage section styles */
 .claude-usage-section {
     padding: 4px 0;
