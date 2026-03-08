@@ -84,6 +84,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._fiveHourResetsAt = null;
         this._sevenDayResetsAt = null;
         this._countdownTimerId = null;
+        this._prevWasLimited = {five_hour: false, seven_day: false};
 
         this._refreshUsage();
         this._startTimer();
@@ -393,8 +394,54 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._sevenDayPercent.set_text(sevenDayText);
         this._updateProgressBar(this._sevenDayProgressBar, sevenDay, sevenDayResetsAt, 'seven_day');
 
+        this._checkForReset('five_hour', fiveHour);
+        this._checkForReset('seven_day', sevenDay);
+
+        this._prevWasLimited.five_hour = fiveHour >= 100;
+        this._prevWasLimited.seven_day = sevenDay >= 100;
+
         this._updateCountdownLabels();
         this._scheduleCountdownTick();
+    }
+
+    _checkForReset(windowKey, currentUtilization) {
+        if (this._prevWasLimited[windowKey] && currentUtilization < 80) {
+            const label = windowKey === 'five_hour' ? '5-hour' : '7-day';
+            this._notifyReset(label);
+        }
+    }
+
+    _notifyReset(windowLabel) {
+        try {
+            Main.notify('Claude Usage', `${windowLabel} usage limit reset! You're good to go.`);
+        } catch (e) {
+            console.error('Claude Usage: Failed to show notification:', e.message);
+        }
+        this._playRacingBeep();
+    }
+
+    _playRacingBeep() {
+        try {
+            const script = `
+                play_beep() {
+                    timeout "$2" gst-launch-1.0 -q audiotestsrc freq="$1" ! audioconvert ! autoaudiosink 2>/dev/null
+                }
+                play_beep 880 0.3
+                sleep 0.3
+                play_beep 880 0.3
+                sleep 0.3
+                play_beep 880 0.3
+                sleep 0.3
+                play_beep 1320 0.9
+            `;
+            // Subprocess starts immediately; no need to await
+            Gio.Subprocess.new(
+                ['bash', '-c', script],
+                Gio.SubprocessFlags.NONE
+            );
+        } catch (e) {
+            console.error('Claude Usage: Failed to play sound:', e.message);
+        }
     }
 
     _updateCountdownLabels() {
@@ -449,7 +496,16 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
         if (minSecondsUntilReset <= 0) {
             this._updateCountdownLabels();
-            GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
+            if (this._prevWasLimited.five_hour) {
+                this._notifyReset('5-hour');
+                this._prevWasLimited.five_hour = false;
+            }
+            if (this._prevWasLimited.seven_day) {
+                this._notifyReset('7-day');
+                this._prevWasLimited.seven_day = false;
+            }
+            this._resetRefreshTimerId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 3, () => {
+                this._resetRefreshTimerId = null;
                 this._refreshUsage();
                 return GLib.SOURCE_REMOVE;
             });
@@ -553,6 +609,10 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     destroy() {
         this._stopTimer();
         this._stopCountdownTimer();
+        if (this._resetRefreshTimerId) {
+            GLib.source_remove(this._resetRefreshTimerId);
+            this._resetRefreshTimerId = null;
+        }
         if (this._session) {
             this._session.abort();
             this._session = null;
