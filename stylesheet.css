@@ -34,13 +34,13 @@
 .claude-section-title {
     font-size: 13px;
     font-weight: 600;
-    color: #e0e0e0;
+    color: #000000;
 }
 
 .claude-percent-label {
     font-size: 13px;
     font-weight: bold;
-    color: #ffffff;
+    color: #000000;
 }
 
 /* Progress bar styles */
@@ -77,7 +77,7 @@
 /* Reset label styles */
 .claude-reset-label {
     font-size: 11px;
-    color: #a0a0a0;
+    color: #000000;
 }
 
 /* Footer styles */
@@ -90,7 +90,7 @@
     padding: 4px 12px;
     border-radius: 4px;
     background-color: rgba(255, 255, 255, 0.1);
-    color: #ffffff;
+    color: #000000;
     font-size: 12px;
 }
 
@@ -105,5 +105,5 @@
 .claude-last-updated-label {
     font-size: 10px;
     font-style: italic;
-    color: #808080;
+    color: #000000;
 }
