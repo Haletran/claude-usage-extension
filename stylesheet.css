@@ -32,12 +32,10 @@
 
 .claude-section-title {
     font-weight: 600;
-    color: #000000;
 }
 
 .claude-percent-label {
     font-weight: bold;
-    color: #000000;
 }
 
 /* Progress bar styles */
@@ -71,10 +69,7 @@
     background-color: #ef4444;
 }
 
-/* Reset label styles */
-.claude-reset-label {
-    color: #000000;
-}
+
 
 /* Footer styles */
 .claude-footer-box {
