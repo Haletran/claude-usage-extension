@@ -4,7 +4,6 @@
 }
 
 .claude-usage-label {
-    font-size: 12px;
     font-weight: bold;
 }
 
@@ -32,13 +31,11 @@
 }
 
 .claude-section-title {
-    font-size: 13px;
     font-weight: 600;
     color: #000000;
 }
 
 .claude-percent-label {
-    font-size: 13px;
     font-weight: bold;
     color: #000000;
 }
@@ -76,7 +73,6 @@
 
 /* Reset label styles */
 .claude-reset-label {
-    font-size: 11px;
     color: #000000;
 }
 
