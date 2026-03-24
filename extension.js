@@ -133,7 +133,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         if (style === 'monochrome' && !hasEffect) {
             this._icon.add_effect(new Clutter.DesaturateEffect({factor: 1.0, name: desatName}));
             const brightnessEffect = new Clutter.BrightnessContrastEffect({name: brightName});
-            brightnessEffect.set_brightness_full(1, 1, 1);
+            brightnessEffect.set_brightness_full(0.6, 0.6, 0.6);
             this._icon.add_effect(brightnessEffect);
         } else if (style !== 'monochrome' && hasEffect) {
             this._icon.remove_effect_by_name(desatName);
