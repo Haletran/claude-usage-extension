@@ -100,6 +100,24 @@ export default class ClaudeUsagePreferences extends ExtensionPreferences {
         );
         displayGroup.add(showIconRow);
 
+        const menuGroup = new Adw.PreferencesGroup({
+            title: 'Menu Display',
+            description: 'Configure the popup menu shown when clicking the indicator',
+        });
+        page.add(menuGroup);
+
+        const showPerModelRow = new Adw.SwitchRow({
+            title: 'Show Per-Model Weekly Limits',
+            subtitle: 'Show extra 7-day usage sections for each model exposed by the API (e.g. Opus, Sonnet)',
+        });
+        settings.bind(
+            'show-per-model-weekly',
+            showPerModelRow,
+            'active',
+            Gio.SettingsBindFlags.DEFAULT
+        );
+        menuGroup.add(showPerModelRow);
+
         const networkGroup = new Adw.PreferencesGroup({
             title: 'Network',
             description: 'Configure network settings',

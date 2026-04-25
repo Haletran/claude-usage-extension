@@ -6,6 +6,7 @@ A GNOME Shell extension that displays your Claude Code API usage percentage in t
 ## Features                                                                                                                                                                                                      
                                                                                                                                                                                                                    
 - **Real-time usage monitoring** - View your 5-hour and 7-day Claude Code usage                                                                                                                                  
+- **Per-model weekly limits** - Optionally show 7-day usage broken down per model (e.g. Opus, Sonnet) when exposed by the API. Toggle in settings.
 - **Settings menu*** - Change the layout or the refresh time                                                                                                                                              
                                                                                                                                                                                                             
 ## Requirements                                                                                                                                                                                                  
