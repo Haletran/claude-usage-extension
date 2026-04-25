@@ -13,6 +13,23 @@ import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/ex
 
 const API_URL = 'https://api.anthropic.com/api/oauth/usage';
 
+const PER_MODEL_LABEL_MAP = {
+    opus: 'Opus',
+    sonnet: 'Sonnet',
+    haiku: 'Haiku',
+    oauth_apps: 'OAuth Apps',
+    omelette: 'Claude Design',
+};
+
+function _formatPerModelLabel(suffix) {
+    if (PER_MODEL_LABEL_MAP[suffix])
+        return PER_MODEL_LABEL_MAP[suffix];
+    return suffix
+        .split('_')
+        .map(w => w.length === 0 ? w : w[0].toUpperCase() + w.slice(1))
+        .join(' ');
+}
+
 const ClaudeUsageIndicator = GObject.registerClass(
 class ClaudeUsageIndicator extends PanelMenu.Button {
     _init(extensionPath, settings, openPreferences) {
@@ -72,6 +89,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 this._recreateSession();
             } else if (key === 'icon-style') {
                 this._updateIconStyle();
+            } else if (key === 'show-per-model-weekly') {
+                this._updatePerModelVisibility();
             }
         });
 
@@ -226,6 +245,23 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         sevenDayItem.add_child(sevenDayBox);
         this.menu.addMenuItem(sevenDayItem);
 
+        this._perModelSeparator = new PopupMenu.PopupSeparatorMenuItem();
+        this.menu.addMenuItem(this._perModelSeparator);
+
+        this._perModelContainer = new St.BoxLayout({
+            style_class: 'claude-per-model-container',
+            vertical: true,
+        });
+        this._perModelMenuItem = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+        });
+        this._perModelMenuItem.add_child(this._perModelContainer);
+        this.menu.addMenuItem(this._perModelMenuItem);
+
+        this._perModelMenuItem.visible = false;
+        this._perModelSeparator.visible = false;
+
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         const settingsItem = new PopupMenu.PopupMenuItem('Settings');
@@ -348,6 +384,66 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 `Resets in ${this._formatResetTime(data.seven_day.resets_at)}`
             );
         }
+
+        this._renderPerModelSections(data);
+    }
+
+    _renderPerModelSections(data) {
+        this._perModelEntries = Object.keys(data)
+            .filter(k => k.startsWith('seven_day_') && k !== 'seven_day' && data[k] !== null)
+            .map(k => ({suffix: k.replace(/^seven_day_/, ''), entry: data[k]}));
+
+        this._perModelContainer.destroy_all_children();
+
+        this._perModelEntries.forEach(({suffix, entry}, idx) => {
+            const sectionBox = new St.BoxLayout({
+                style_class: 'claude-usage-section',
+                vertical: true,
+            });
+            if (idx > 0)
+                sectionBox.set_style('margin-top: 8px;');
+
+            const header = new St.BoxLayout({vertical: false});
+            const titleLabel = new St.Label({
+                text: `${_formatPerModelLabel(suffix)} (7-Day)`,
+                style_class: 'claude-section-title',
+            });
+            header.add_child(titleLabel);
+            const percentLabel = new St.Label({
+                text: `${(entry.utilization ?? 0).toFixed(1)}%`,
+                style_class: 'claude-percent-label',
+                x_expand: true,
+                x_align: Clutter.ActorAlign.END,
+            });
+            header.add_child(percentLabel);
+            sectionBox.add_child(header);
+
+            const progressBg = new St.Widget({style_class: 'claude-progress-bg'});
+            const progressBar = new St.Widget({style_class: 'claude-progress-bar'});
+            progressBg.add_child(progressBar);
+            sectionBox.add_child(progressBg);
+            this._updateProgressBar(progressBar, entry.utilization ?? 0);
+
+            const resetLabel = new St.Label({
+                text: entry.resets_at
+                    ? `Resets in ${this._formatResetTime(entry.resets_at)}`
+                    : 'Not used yet',
+                style_class: 'claude-reset-label',
+            });
+            sectionBox.add_child(resetLabel);
+
+            this._perModelContainer.add_child(sectionBox);
+        });
+
+        this._updatePerModelVisibility();
+    }
+
+    _updatePerModelVisibility() {
+        const showSetting = this._settings.get_boolean('show-per-model-weekly');
+        const hasEntries = this._perModelEntries && this._perModelEntries.length > 0;
+        const visible = showSetting && hasEntries;
+        this._perModelMenuItem.visible = visible;
+        this._perModelSeparator.visible = visible;
     }
 
     _updatePanelProgressBar(usage) {
