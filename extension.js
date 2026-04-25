@@ -18,6 +18,7 @@ const PER_MODEL_LABEL_MAP = {
     sonnet: 'Sonnet',
     haiku: 'Haiku',
     oauth_apps: 'OAuth Apps',
+    omelette: 'Claude Design',
 };
 
 function _formatPerModelLabel(suffix) {
