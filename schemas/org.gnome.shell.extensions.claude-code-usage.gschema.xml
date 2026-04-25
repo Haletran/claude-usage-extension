@@ -26,5 +26,10 @@
       <summary>Proxy URL</summary>
       <description>HTTP proxy URL (e.g., http://localhost:11809). Leave empty to use no proxy.</description>
     </key>
+    <key name="show-per-model-weekly" type="b">
+      <default>true</default>
+      <summary>Show per-model weekly usage</summary>
+      <description>Whether to show per-model 7-day usage sections (e.g. Opus, Sonnet) in the popup menu, when the API exposes them.</description>
+    </key>
   </schema>
 </schemalist>
