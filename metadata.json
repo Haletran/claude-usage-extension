@@ -1,12 +1,9 @@
 {
-  "name": "Claude Code Usage",
-  "description": "Display Claude Code usage in the top panel. This extension uses anthropic.com services. This extension is not affiliated, funded, or in any way associated with Claude.",
-  "uuid": "claude-code-usage@haletran.com",
+  "name": "Claude Code Usage (Legacy)",
+  "description": "Display Claude Code usage in the top panel. Legacy backport for GNOME Shell 43/44 (Debian 12, Ubuntu 22.10). Based on the original Claude Code Usage extension by Haletran. This extension uses anthropic.com services and is not affiliated, funded, or in any way associated with Claude.",
+  "uuid": "claude-code-usage-legacy@ayce45.github.io",
   "shell-version": ["43", "44"],
-  "url": "https://github.com/Haletran/claude-usage-extension",
-  "settings-schema": "org.gnome.shell.extensions.claude-code-usage",
-  "donations": {
-    "github": "Haletran"
-  },
-  "version": 3
+  "url": "https://github.com/Ayce45/claude-usage-extension",
+  "settings-schema": "org.gnome.shell.extensions.claude-code-usage-legacy",
+  "version": 1
 }

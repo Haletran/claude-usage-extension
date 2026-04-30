@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<schemalist gettext-domain="claude-code-usage">
-  <schema id="org.gnome.shell.extensions.claude-code-usage" path="/org/gnome/shell/extensions/claude-code-usage/">
+<schemalist gettext-domain="claude-code-usage-legacy">
+  <schema id="org.gnome.shell.extensions.claude-code-usage-legacy" path="/org/gnome/shell/extensions/claude-code-usage-legacy/">
     <key name="refresh-interval" type="i">
       <default>300</default>
       <summary>Refresh interval</summary>

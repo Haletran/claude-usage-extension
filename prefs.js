@@ -6,7 +6,7 @@ const ExtensionUtils = imports.misc.extensionUtils;
 function init() {}
 
 function fillPreferencesWindow(window) {
-    const settings = ExtensionUtils.getSettings('org.gnome.shell.extensions.claude-code-usage');
+    const settings = ExtensionUtils.getSettings();
 
     const page = new Adw.PreferencesPage({
         title: 'Claude Usage Settings',

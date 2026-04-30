@@ -423,7 +423,7 @@ class ClaudeUsageExtension {
     }
 
     enable() {
-        this._settings = ExtensionUtils.getSettings('org.gnome.shell.extensions.claude-code-usage');
+        this._settings = ExtensionUtils.getSettings();
         this._indicator = new ClaudeUsageIndicator(
             Me.path,
             this._settings,
