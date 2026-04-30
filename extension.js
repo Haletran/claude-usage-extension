@@ -1,15 +1,13 @@
-import GLib from 'gi://GLib';
-import GObject from 'gi://GObject';
-import Gio from 'gi://Gio';
-import St from 'gi://St';
-import Clutter from 'gi://Clutter';
-import Soup from 'gi://Soup';
+'use strict';
 
-import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
-import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+imports.gi.versions.Soup = '3.0';
 
-import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
+const {GLib, GObject, Gio, St, Clutter, Soup} = imports.gi;
+const Main = imports.ui.main;
+const PanelMenu = imports.ui.panelMenu;
+const PopupMenu = imports.ui.popupMenu;
+const ExtensionUtils = imports.misc.extensionUtils;
+const Me = ExtensionUtils.getCurrentExtension();
 
 const API_URL = 'https://api.anthropic.com/api/oauth/usage';
 
@@ -123,7 +121,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         }
         this._session = this._createSession();
         this._refreshUsage();
-	}
+    }
+
     _updateIconStyle() {
         const style = this._settings.get_string('icon-style');
         const desatName = 'monochrome-desaturate';
@@ -146,7 +145,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             style_class: 'claude-usage-section',
             vertical: true,
         });
-        const fiveHourHeader = new St.BoxLayout({ vertical: false });
+        const fiveHourHeader = new St.BoxLayout({vertical: false});
         const fiveHourLabel = new St.Label({
             text: '5-Hour Usage',
             style_class: 'claude-section-title',
@@ -189,7 +188,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             style_class: 'claude-usage-section',
             vertical: true,
         });
-        const sevenDayHeader = new St.BoxLayout({ vertical: false });
+        const sevenDayHeader = new St.BoxLayout({vertical: false});
         const sevenDayLabel = new St.Label({
             text: '7-Day Usage',
             style_class: 'claude-section-title',
@@ -284,7 +283,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
                 this._fetchUsage(token);
             } catch (e) {
-                console.error('Claude Usage: Failed to read credentials:', e.message);
+                logError(e, 'Claude Usage: Failed to read credentials');
                 this._label.set_text('No token');
                 this._fiveHourPercent.set_text('No credentials');
                 this._sevenDayPercent.set_text('—');
@@ -316,7 +315,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
                     this._updateDisplay(data);
                 } catch (e) {
-                    console.error('Claude Usage: Failed to fetch usage:', e.message);
+                    logError(e, 'Claude Usage: Failed to fetch usage');
                     this._label.set_text('Error');
                 }
             }
@@ -417,20 +416,31 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
     }
 });
 
-export default class ClaudeUsageExtension extends Extension {
-    enable() {
-        this._settings = this.getSettings();
-        this._indicator = new ClaudeUsageIndicator(
-            this.path,
-            this._settings,
-            () => this.openPreferences()
-        );
-        Main.panel.addToStatusArea(this.uuid, this._indicator);
-    }
-
-    disable() {
-        this._indicator?.destroy();
+class ClaudeUsageExtension {
+    constructor() {
         this._indicator = null;
         this._settings = null;
     }
+
+    enable() {
+        this._settings = ExtensionUtils.getSettings('org.gnome.shell.extensions.claude-code-usage');
+        this._indicator = new ClaudeUsageIndicator(
+            Me.path,
+            this._settings,
+            () => ExtensionUtils.openPrefs()
+        );
+        Main.panel.addToStatusArea(Me.metadata.uuid, this._indicator);
+    }
+
+    disable() {
+        if (this._indicator) {
+            this._indicator.destroy();
+            this._indicator = null;
+        }
+        this._settings = null;
+    }
+}
+
+function init() {
+    return new ClaudeUsageExtension();
 }
