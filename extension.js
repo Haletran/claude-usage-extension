@@ -294,8 +294,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
 
     _fetchUsage(token) {
         const message = Soup.Message.new('GET', API_URL);
-        message.request_headers.append('Authorization', `Bearer ${token}`);
-        message.request_headers.append('anthropic-beta', 'oauth-2025-04-20');
+        message.get_request_headers().append('Authorization', `Bearer ${token}`);
+        message.get_request_headers().append('anthropic-beta', 'oauth-2025-04-20');
 
         this._session.send_and_read_async(
             message,
