@@ -12,6 +12,8 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const API_URL = 'https://api.anthropic.com/api/oauth/usage';
+const TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token';
+const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 
 const ClaudeUsageIndicator = GObject.registerClass(
 class ClaudeUsageIndicator extends PanelMenu.Button {
@@ -267,13 +269,20 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             '.credentials.json',
         ]);
 
+        this._credentialsPath = credentialsPath;
+
         const file = Gio.File.new_for_path(credentialsPath);
         file.load_contents_async(null, (file, result) => {
             try {
                 const [, contents] = file.load_contents_finish(result);
                 const decoder = new TextDecoder('utf-8');
                 const json = JSON.parse(decoder.decode(contents));
-                const token = json.claudeAiOauth?.accessToken;
+                this._credentials = json;
+
+                const oauth = json.claudeAiOauth ?? {};
+                const token = oauth.accessToken;
+                const refreshToken = oauth.refreshToken;
+                const expiresAt = oauth.expiresAt;
 
                 if (!token) {
                     this._label.set_text('No token');
@@ -282,7 +291,16 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                     return;
                 }
 
-                this._fetchUsage(token);
+                // Proactively refresh if the access token is expired (60s buffer).
+                const expired = typeof expiresAt === 'number' &&
+                    expiresAt - Date.now() < 60000;
+                if (expired && refreshToken) {
+                    this._refreshToken(refreshToken, (newToken) => {
+                        this._fetchUsage(newToken, true);
+                    });
+                } else {
+                    this._fetchUsage(token, false);
+                }
             } catch (e) {
                 console.error('Claude Usage: Failed to read credentials:', e.message);
                 this._label.set_text('No token');
@@ -292,7 +310,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         });
     }
 
-    _fetchUsage(token) {
+    _fetchUsage(token, alreadyRefreshed) {
         const message = Soup.Message.new('GET', API_URL);
         message.request_headers.append('Authorization', `Bearer ${token}`);
         message.request_headers.append('anthropic-beta', 'oauth-2025-04-20');
@@ -304,6 +322,18 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
             (session, result) => {
                 try {
                     const bytes = session.send_and_read_finish(result);
+
+                    // On auth failure, attempt a one-time token refresh then retry.
+                    if (message.status_code === 401 && !alreadyRefreshed) {
+                        const refreshToken =
+                            this._credentials?.claudeAiOauth?.refreshToken;
+                        if (refreshToken) {
+                            this._refreshToken(refreshToken, (newToken) => {
+                                this._fetchUsage(newToken, true);
+                            });
+                            return;
+                        }
+                    }
 
                     if (message.status_code !== 200) {
                         this._label.set_text('Error');
@@ -321,6 +351,103 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 }
             }
         );
+    }
+
+    _refreshToken(refreshToken, onSuccess) {
+        const message = Soup.Message.new('POST', TOKEN_URL);
+        message.request_headers.append('User-Agent', 'anthropic');
+
+        const body = JSON.stringify({
+            grant_type: 'refresh_token',
+            refresh_token: refreshToken,
+            client_id: CLIENT_ID,
+        });
+        const bodyBytes = new GLib.Bytes(new TextEncoder().encode(body));
+        message.set_request_body_from_bytes('application/json', bodyBytes);
+
+        this._session.send_and_read_async(
+            message,
+            GLib.PRIORITY_DEFAULT,
+            null,
+            (session, result) => {
+                try {
+                    const bytes = session.send_and_read_finish(result);
+
+                    if (message.status_code !== 200) {
+                        console.error(
+                            `Claude Usage: Token refresh failed: HTTP ${message.status_code}`
+                        );
+                        this._label.set_text('Error');
+                        this._fiveHourPercent.set_text('Re-login needed');
+                        return;
+                    }
+
+                    const decoder = new TextDecoder('utf-8');
+                    const data = JSON.parse(decoder.decode(bytes.get_data()));
+                    const newToken = data.access_token;
+
+                    if (!newToken) {
+                        this._label.set_text('Error');
+                        return;
+                    }
+
+                    // Persist the rotated tokens back to the credentials file so
+                    // the Claude Code CLI stays in sync on its next run.
+                    const oauth = this._credentials.claudeAiOauth ??
+                        (this._credentials.claudeAiOauth = {});
+                    oauth.accessToken = newToken;
+                    if (data.refresh_token) {
+                        oauth.refreshToken = data.refresh_token;
+                    }
+                    if (typeof data.expires_in === 'number') {
+                        oauth.expiresAt = Date.now() + data.expires_in * 1000;
+                    }
+                    this._writeCredentials();
+
+                    onSuccess(newToken);
+                } catch (e) {
+                    console.error('Claude Usage: Token refresh error:', e.message);
+                    this._label.set_text('Error');
+                }
+            }
+        );
+    }
+
+    _writeCredentials() {
+        try {
+            const out = JSON.stringify(this._credentials, null, 2);
+            const file = Gio.File.new_for_path(this._credentialsPath);
+            const bytes = new GLib.Bytes(new TextEncoder().encode(out));
+            file.replace_contents_bytes_async(
+                bytes,
+                null,
+                false,
+                Gio.FileCreateFlags.REPLACE_DESTINATION,
+                null,
+                (file, result) => {
+                    try {
+                        file.replace_contents_finish(result);
+                        // Keep the credentials file private (0600).
+                        file.set_attribute_uint32(
+                            'unix::mode',
+                            0o600,
+                            Gio.FileQueryInfoFlags.NONE,
+                            null
+                        );
+                    } catch (e) {
+                        console.error(
+                            'Claude Usage: Failed to write credentials:',
+                            e.message
+                        );
+                    }
+                }
+            );
+        } catch (e) {
+            console.error(
+                'Claude Usage: Failed to serialize credentials:',
+                e.message
+            );
+        }
     }
 
     _updateDisplay(data) {
