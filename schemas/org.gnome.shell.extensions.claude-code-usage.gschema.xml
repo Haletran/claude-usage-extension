@@ -11,6 +11,11 @@
       <summary>Display mode</summary>
       <description>How to display usage in the panel: 'text' for percentage text, 'bar' for a progress bar, or 'both' for both</description>
     </key>
+    <key name="panel-metric" type="s">
+      <default>'five_hour'</default>
+      <summary>Panel metric</summary>
+      <description>Which usage limit to show in the panel: 'five_hour' for the 5-hour limit, 'seven_day' for the weekly limit, or 'both' to show both</description>
+    </key>
     <key name="icon-style" type="s">
       <default>'color'</default>
       <summary>Icon style</summary>

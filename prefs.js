@@ -68,6 +68,28 @@ export default class ClaudeUsagePreferences extends ExtensionPreferences {
 
         displayGroup.add(displayModeRow);
 
+        const panelMetricRow = new Adw.ComboRow({
+            title: 'Panel Metric',
+            subtitle: 'Which usage limit to show in the panel',
+        });
+
+        const panelMetricModel = new Gtk.StringList();
+        panelMetricModel.append('5-Hour Limit');
+        panelMetricModel.append('Weekly Limit');
+        panelMetricModel.append('Both');
+        panelMetricRow.set_model(panelMetricModel);
+
+        const panelMetrics = ['five_hour', 'seven_day', 'both'];
+        const currentMetric = settings.get_string('panel-metric');
+        const metricIndex = panelMetrics.indexOf(currentMetric);
+        panelMetricRow.set_selected(metricIndex === -1 ? 0 : metricIndex);
+
+        panelMetricRow.connect('notify::selected', () => {
+            settings.set_string('panel-metric', panelMetrics[panelMetricRow.get_selected()]);
+        });
+
+        displayGroup.add(panelMetricRow);
+
         const iconStyleRow = new Adw.ComboRow({
             title: 'Icon Style',
             subtitle: 'Use a color or monochrome icon in the panel',

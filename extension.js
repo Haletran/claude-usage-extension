@@ -36,36 +36,25 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         });
         this._box.add_child(this._icon);
 
-        this._panelProgressBg = new St.Widget({
-            style_class: 'claude-panel-progress-bg',
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        this._panelProgressBar = new St.Widget({
-            style_class: 'claude-panel-progress-bar',
-        });
-        this._panelProgressBg.add_child(this._panelProgressBar);
-        this._box.add_child(this._panelProgressBg);
+        this._fiveHourPanel = this._createPanelMetric('5h');
+        this._box.add_child(this._fiveHourPanel.container);
 
-        this._label = new St.Label({
-            text: '...',
-            y_align: Clutter.ActorAlign.CENTER,
-            style_class: 'claude-usage-label',
-        });
-        this._box.add_child(this._label);
+        this._sevenDayPanel = this._createPanelMetric('7d');
+        this._box.add_child(this._sevenDayPanel.container);
 
         this.add_child(this._box);
 
         this._createMenu();
 
-        this._updateDisplayMode();
+        this._updatePanelLayout();
         this._updateIconVisibility();
         this._updateIconStyle();
 
         this._settingsChangedId = this._settings.connect('changed', (settings, key) => {
             if (key === 'refresh-interval') {
                 this._restartTimer();
-            } else if (key === 'display-mode') {
-                this._updateDisplayMode();
+            } else if (key === 'display-mode' || key === 'panel-metric') {
+                this._updatePanelLayout();
             } else if (key === 'show-icon') {
                 this._updateIconVisibility();
             } else if (key === 'proxy-url') {
@@ -79,21 +68,61 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         this._startTimer();
     }
 
-    _updateDisplayMode() {
+    _createPanelMetric(prefix) {
+        const container = new St.BoxLayout({
+            style_class: 'claude-panel-metric',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+
+        const progressBg = new St.Widget({
+            style_class: 'claude-panel-progress-bg',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        const progressBar = new St.Widget({
+            style_class: 'claude-panel-progress-bar',
+        });
+        progressBg.add_child(progressBar);
+        container.add_child(progressBg);
+
+        const label = new St.Label({
+            text: '...',
+            y_align: Clutter.ActorAlign.CENTER,
+            style_class: 'claude-usage-label',
+        });
+        container.add_child(label);
+
+        return {prefix, container, progressBg, progressBar, label, showPrefix: false};
+    }
+
+    _updatePanelLayout() {
         const mode = this._settings.get_string('display-mode');
-        if (mode === 'bar') {
-            this._panelProgressBg.show();
-            this._label.hide();
-            this._label.set_style('margin-left: 0;');
-        } else if (mode === 'both') {
-            this._panelProgressBg.show();
-            this._label.show();
-            this._label.set_style('margin-left: 6px;');
-        } else {
-            this._panelProgressBg.hide();
-            this._label.show();
-            this._label.set_style('margin-left: 0;');
+        const metric = this._settings.get_string('panel-metric');
+        const showFive = metric === 'five_hour' || metric === 'both';
+        const showSeven = metric === 'seven_day' || metric === 'both';
+        const both = showFive && showSeven;
+
+        this._applyMetricMode(this._fiveHourPanel, mode, showFive, both);
+        this._applyMetricMode(this._sevenDayPanel, mode, showSeven, both);
+
+        // Separate the two metrics when both are visible in the panel.
+        this._sevenDayPanel.container.set_style(both ? 'margin-left: 8px;' : 'margin-left: 0;');
+    }
+
+    _applyMetricMode(panel, mode, visible, showPrefix) {
+        panel.showPrefix = showPrefix;
+
+        if (!visible) {
+            panel.container.hide();
+            return;
         }
+        panel.container.show();
+
+        const showBar = mode === 'bar' || mode === 'both';
+        const showLabel = mode === 'text' || mode === 'both';
+
+        panel.progressBg.visible = showBar;
+        panel.label.visible = showLabel;
+        panel.label.set_style(showBar && showLabel ? 'margin-left: 6px;' : 'margin-left: 0;');
     }
 
     _updateIconVisibility() {
@@ -276,7 +305,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 const token = json.claudeAiOauth?.accessToken;
 
                 if (!token) {
-                    this._label.set_text('No token');
+                    this._setPanelStatus('No token');
                     this._fiveHourPercent.set_text('No credentials');
                     this._sevenDayPercent.set_text('—');
                     return;
@@ -285,7 +314,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                 this._fetchUsage(token);
             } catch (e) {
                 console.error('Claude Usage: Failed to read credentials:', e.message);
-                this._label.set_text('No token');
+                this._setPanelStatus('No token');
                 this._fiveHourPercent.set_text('No credentials');
                 this._sevenDayPercent.set_text('—');
             }
@@ -306,7 +335,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                     const bytes = session.send_and_read_finish(result);
 
                     if (message.status_code !== 200) {
-                        this._label.set_text('Error');
+                        this._setPanelStatus('Error');
                         this._fiveHourPercent.set_text(`HTTP ${message.status_code}`);
                         return;
                     }
@@ -317,7 +346,7 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
                     this._updateDisplay(data);
                 } catch (e) {
                     console.error('Claude Usage: Failed to fetch usage:', e.message);
-                    this._label.set_text('Error');
+                    this._setPanelStatus('Error');
                 }
             }
         );
@@ -327,9 +356,8 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         const fiveHour = data.five_hour?.utilization ?? 0;
         const sevenDay = data.seven_day?.utilization ?? 0;
 
-        this._label.set_text(`${Math.round(fiveHour)}%`);
-
-        this._updatePanelProgressBar(fiveHour);
+        this._setPanelMetric(this._fiveHourPanel, fiveHour);
+        this._setPanelMetric(this._sevenDayPanel, sevenDay);
 
         this._fiveHourPercent.set_text(`${fiveHour.toFixed(1)}%`);
         this._updateProgressBar(this._fiveHourProgressBar, fiveHour);
@@ -350,10 +378,21 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         }
     }
 
-    _updatePanelProgressBar(usage) {
+    _setPanelStatus(text) {
+        this._fiveHourPanel.label.set_text(text);
+        this._sevenDayPanel.label.set_text(text);
+    }
+
+    _setPanelMetric(panel, usage) {
+        const percent = `${Math.round(usage)}%`;
+        panel.label.set_text(panel.showPrefix ? `${panel.prefix} ${percent}` : percent);
+        this._updatePanelProgressBar(panel.progressBar, usage);
+    }
+
+    _updatePanelProgressBar(progressBar, usage) {
         const maxWidth = 50;
         const width = Math.round((Math.min(100, Math.max(0, usage)) / 100) * maxWidth);
-        this._panelProgressBar.set_width(width);
+        progressBar.set_width(width);
     }
 
     _updateProgressBar(progressBar, usage) {
