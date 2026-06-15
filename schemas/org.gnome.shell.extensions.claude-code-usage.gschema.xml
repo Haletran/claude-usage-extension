@@ -26,5 +26,27 @@
       <summary>Proxy URL</summary>
       <description>HTTP proxy URL (e.g., http://localhost:11809). Leave empty to use no proxy.</description>
     </key>
+    <key name="profiles" type="s">
+      <default>'[{"name": "Default", "path": "~/.claude", "showInPanel": true}]'</default>
+      <summary>Profiles</summary>
+      <description>JSON string containing an array of profiles with name, path, and showInPanel</description>
+    </key>
+    <key name="file-monitoring-enabled" type="b">
+      <default>false</default>
+      <summary>Enable file-activity-driven refresh</summary>
+      <description>When enabled, watches Claude config directories for session activity and refreshes shortly after activity stops. When disabled, only the periodic refresh timer triggers API calls.</description>
+    </key>
+    <key name="debounce-delay" type="i">
+      <default>30</default>
+      <range min="5" max="300"/>
+      <summary>Activity debounce delay</summary>
+      <description>Seconds of file-activity silence before triggering a usage refresh</description>
+    </key>
+    <key name="debounce-min-interval" type="i">
+      <default>60</default>
+      <range min="10" max="600"/>
+      <summary>Minimum debounce interval</summary>
+      <description>Minimum seconds between consecutive activity-triggered usage refreshes for a profile</description>
+    </key>
   </schema>
 </schemalist>
