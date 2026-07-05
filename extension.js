@@ -296,6 +296,11 @@ class ClaudeUsageIndicator extends PanelMenu.Button {
         const message = Soup.Message.new('GET', API_URL);
         message.request_headers.append('Authorization', `Bearer ${token}`);
         message.request_headers.append('anthropic-beta', 'oauth-2025-04-20');
+        // Without a claude-code User-Agent, requests land in an aggressively
+        // rate-limited bucket that returns persistent 429s regardless of poll
+        // interval, making usage monitoring unusable.
+        // See anthropics/claude-code#31021, #30930, #31637.
+        message.request_headers.append('User-Agent', 'claude-code/2.1.0');
 
         this._session.send_and_read_async(
             message,
